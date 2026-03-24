@@ -2,8 +2,14 @@
 <html>
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <title>Ocean Hunter</title>
+<link rel="preload" href="images/intro_01.webp" as="image" type="image/webp">
+<link rel="preload" href="images/intro_02.webp" as="image" type="image/webp">
+<link rel="preload" href="images/intro_03.webp" as="image" type="image/webp">
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
 body { background:#000; overflow:hidden; touch-action:none; }
@@ -3089,6 +3095,7 @@ function loadExplosionSprites() {
   let loaded = 0;
   EXPLOSION_SPRITE_FRAMES.forEach((src, i) => {
     const img = new Image();
+    img.crossOrigin = "anonymous";
     img.onload = () => {
       loaded++;
       if (loaded === EXPLOSION_SPRITE_FRAMES.length) explosionSpritesLoaded = true;
@@ -3149,6 +3156,7 @@ function initEmbeddedTextures() {
         console.warn("[Tex] load error:", key, i, src);
         EMBEDDED_TEXTURES[key][i] = null;
       };
+      img.crossOrigin = "anonymous";
       img.src = src;  // relative path e.g. "images/img_0396.webp"
     });
   }
@@ -3287,7 +3295,13 @@ let currentWeapon = "bullet";
 const weaponOrder = ["bullet","net","laser"];
 let autoFire = false, autoAim = false, firing = false;
 let lastFireTime = 0;
-const FIRE_COOLDOWNS = { bullet:200, net:600, laser:80 };
+// On mobile, increase cooldowns to reduce simultaneous draw calls
+const _mob = ('ontouchstart' in window) || window.innerWidth < 900;
+const FIRE_COOLDOWNS = {
+  bullet: _mob ? 280 : 200,
+  net:    _mob ? 700 : 600,
+  laser:  _mob ? 120 : 80,
+};
 let fishes = [], projectiles = [], effects = [], particles = [];
 let bossTimer = 0, bossActive = false, bossWarning = false, bossWarningTime = 0;
 const BOSS_INTERVAL = 15000;
@@ -3339,6 +3353,7 @@ let speciesMenuMode = null;       // 'auto' or 'aim'
 function loadTextureFromDataURI(src) {
   return new Promise((resolve, reject) => {
     const img = new Image();
+    img.crossOrigin = "anonymous";  // required for WebGL texImage2D
     img.onload = () => {
       try {
         const tex = PIXI.Texture.from(img);
@@ -3403,13 +3418,17 @@ function getTexture(key, time) {
 async function init() {
   // Create PixiJS application with canvas preference (avoids WebWorker issues in sandboxed environments)
   app = new PIXI.Application();
+  // WebGL is 5-10x faster than canvas for sprites — use it on all devices
+  // Falls back to canvas automatically if WebGL unavailable
+  const isMobile = window.innerWidth < 900 || ('ontouchstart' in window);
   await app.init({
-    preference: "canvas",
+    preference: "webgl",
     width: window.innerWidth,
     height: window.innerHeight,
     backgroundAlpha: 0,
-    antialias: true,
-    resolution: 1,
+    antialias: !isMobile,  // disable antialiasing on mobile for speed
+    resolution: Math.min(window.devicePixelRatio || 1, isMobile ? 1 : 2),
+    autoDensity: true,
   });
   document.body.appendChild(app.canvas);
   app.canvas.style.cssText = "display:block;position:absolute;top:0;left:0;";
@@ -3484,6 +3503,7 @@ async function init() {
         await Promise.all(batch.map(({ src, key, localIdx }) =>
           new Promise(res => {
             const img = new Image();
+            img.crossOrigin = "anonymous";
             img.onload = () => {
               try { EMBEDDED_TEXTURES[key][localIdx] = PIXI.Texture.from(img); } catch(e) {}
               done++; embeddedDone++;
@@ -3524,6 +3544,7 @@ async function init() {
       const asset = ASSET_DATA["31_DEEP_REEF_FLOOR"];
       if (asset && asset.frames[0]) {
         const fallbackImg = new Image();
+        fallbackImg.crossOrigin = "anonymous";
         fallbackImg.src = asset.frames[0];
         bgImageForSlice = fallbackImg;
       }
@@ -4453,6 +4474,9 @@ function update(dt) {
     if (p.animTime !== undefined) p.animTime += dt;
   });
   particles = particles.filter(p => p.life > 0);
+  // Cap total particles to avoid mobile lag — drop oldest if over limit
+  const PARTICLE_CAP = ('ontouchstart' in window) ? 80 : 200;
+  if (particles.length > PARTICLE_CAP) particles.splice(0, particles.length - PARTICLE_CAP);
 
   // Update bouncing drill projectiles
   drillProjectiles.forEach(d => {
@@ -4693,50 +4717,56 @@ function update(dt) {
   lightningEffects = lightningEffects.filter(l => l.life > 0);
 }
 
+// Throttle: only redraw bg every N ms (saves mobile GPU)
+let _bgLastDraw = 0;
 function drawBackgroundSliceDistortion() {
   if (!canvasUnderlay) return;
+  const now = performance.now();
+  // On mobile redraw bg at 20fps (every 50ms) — imperceptible at this animation speed
+  const isMobile = window.innerWidth < 900;
+  if (isMobile && now - _bgLastDraw < 50) return;
+  _bgLastDraw = now;
+
   const ctx = ctxUnderlay;
   const w = canvasUnderlay.width, h = canvasUnderlay.height;
-  ctx.clearRect(0, 0, w, h);
 
   if (!bgImageForSlice || !bgImageForSlice.naturalWidth) {
-    // Fallback: dark background while image loads
     ctx.fillStyle = "#0a2a3a";
     ctx.fillRect(0, 0, w, h);
     return;
   }
 
-  const s = gameContainer._gameScale || 1;
+  const s  = gameContainer._gameScale || 1;
   const ox = gameContainer._gameOffsetX || 0;
   const oy = gameContainer._gameOffsetY || 0;
-  const t = causticsTime;
+  const t  = causticsTime;
   const img = bgImageForSlice;
 
   ctx.save();
   ctx.translate(ox, oy);
   ctx.scale(s, s);
 
-  // Draw background in horizontal slices, each shifted by a sine wave
-  // This creates the classic underwater "looking through rippling water" distortion
-  const sliceH = 4;
+  // Use larger slices (8px instead of 4px) — eliminates sub-pixel gaps on mobile
+  // Snap all coordinates to integers to prevent seams
+  const sliceH = isMobile ? 12 : 8;
   const amp1 = 1.5, freq1 = 0.010, speed1 = 0.6;
   const amp2 = 1.0, freq2 = 0.018, speed2 = 1.0;
-  const vAmp = 0.8, vFreq = 0.006, vSpeed = 0.5;
+  const iH = img.naturalHeight, iW = img.naturalWidth;
 
   for (let y = 0; y < GH; y += sliceH) {
     const sh = Math.min(sliceH, GH - y);
     const dx = Math.sin(t * speed1 + y * freq1) * amp1
              + Math.sin(t * speed2 + y * freq2 + 1.7) * amp2;
-    const dy = Math.sin(t * vSpeed + y * vFreq + 0.5) * vAmp;
 
-    const srcY = (y / GH) * img.naturalHeight;
-    const srcH = (sh / GH) * img.naturalHeight;
+    // Integer source coordinates to prevent fractional-pixel bleed
+    const srcY = Math.floor((y / GH) * iH);
+    const srcH = Math.ceil(((y + sh) / GH) * iH) - srcY + 1; // +1 overlap in source
 
-    ctx.drawImage(
-      img,
-      0, srcY, img.naturalWidth, srcH,
-      dx, y + dy, GW, sh + 2 // overlap by 2px to hide seams
-    );
+    // Integer dest coordinates + 2px dest overlap to seal gaps
+    const destY = Math.floor(y);
+    const destH = Math.ceil(sh) + 2;
+
+    ctx.drawImage(img, 0, srcY, iW, srcH, Math.round(dx), destY, GW, destH);
   }
 
   ctx.restore();
@@ -4821,9 +4851,15 @@ function drawOverlay() {
   ctx.restore();
 }
 
+// Reuse a single PIXI.Graphics for boss waves — no per-frame allocation
+let _bossWaveGraphics = null;
 function updateBossWavesPixi() {
-  // Clear previous wave graphics
-  bossWaveContainer.removeChildren();
+  if (!_bossWaveGraphics) {
+    _bossWaveGraphics = new PIXI.Graphics();
+    bossWaveContainer.addChild(_bossWaveGraphics);
+  }
+  const g = _bossWaveGraphics;
+  g.clear();
 
   fishes.forEach(fish => {
     if (!fish.isBoss || !fish.alive) return;
@@ -4834,8 +4870,6 @@ function updateBossWavesPixi() {
     const pos2 = pathPos(fish.pts, Math.min(1, t+0.005));
     const dir = Math.atan2(pos2.y-pos.y, pos2.x-pos.x);
     const perpX = -Math.sin(dir), perpY = Math.cos(dir);
-
-    const g = new PIXI.Graphics();
 
     // Concentric wave rings
     for (let i = 0; i < 8; i++) {
@@ -4867,10 +4901,11 @@ function updateBossWavesPixi() {
     const shimR = fish.size*0.9;
     g.ellipse(pos.x, pos.y, shimR*1.6, shimR*0.8);
     g.fill({ color: 0x96E6FF, alpha: 0.08 });
-
-    bossWaveContainer.addChild(g);
   });
 }
+
+// Detect mobile once for performance branches
+const _isMobilePerfMode = ('ontouchstart' in window) || window.innerWidth < 900;
 
 function drawEffects(ctx) {
   effects.forEach(e => {
@@ -4910,9 +4945,9 @@ function drawEffects(ctx) {
     } else if (e.type === "reward_text") {
       ctx.save(); ctx.globalAlpha = alpha;
       const rise = (1-e.life/e.maxLife)*70;
-      ctx.fillStyle = "#FFD700"; ctx.strokeStyle = "#000"; ctx.lineWidth = 3;
-      ctx.font = "bold 36px Arial"; ctx.textAlign = "center";
-      ctx.strokeText(e.text, e.x, e.y-rise);
+      ctx.fillStyle = "#FFD700"; ctx.textAlign = "center";
+      ctx.font = "bold 36px Arial";
+      if (!_isMobilePerfMode) { ctx.strokeStyle = "#000"; ctx.lineWidth = 3; ctx.strokeText(e.text, e.x, e.y-rise); }
       ctx.fillText(e.text, e.x, e.y-rise);
       ctx.restore();
     } else if (e.type === "laser_beam") {
@@ -4985,27 +5020,27 @@ function drawEffects(ctx) {
         ctx.stroke();
       }
 
-      // Outer electric glow (wide, blue)
-      ctx.globalAlpha = coreAlpha * branch.alpha * 0.35;
-      ctx.strokeStyle = "#44AAFF";
-      ctx.lineWidth = (branch.width + 8) * (0.4 + coreAlpha * 0.6);
-      ctx.shadowColor = "#0088FF";
-      ctx.shadowBlur = 30;
-      drawBranch(branch.pts);
-
-      // Mid glow
-      ctx.globalAlpha = coreAlpha * branch.alpha * 0.6;
-      ctx.strokeStyle = "#88CCFF";
-      ctx.lineWidth = (branch.width + 3) * (0.4 + coreAlpha * 0.6);
-      ctx.shadowBlur = 15;
-      drawBranch(branch.pts);
-
-      // Core: white-hot during flash, bright blue thereafter
+      if (!_isMobilePerfMode) {
+        // Outer electric glow (skip on mobile — too expensive)
+        ctx.globalAlpha = coreAlpha * branch.alpha * 0.35;
+        ctx.strokeStyle = "#44AAFF";
+        ctx.lineWidth = (branch.width + 8) * (0.4 + coreAlpha * 0.6);
+        ctx.shadowColor = "#0088FF";
+        ctx.shadowBlur = 30;
+        drawBranch(branch.pts);
+        // Mid glow
+        ctx.globalAlpha = coreAlpha * branch.alpha * 0.6;
+        ctx.strokeStyle = "#88CCFF";
+        ctx.lineWidth = (branch.width + 3) * (0.4 + coreAlpha * 0.6);
+        ctx.shadowBlur = 15;
+        drawBranch(branch.pts);
+      }
+      // Core bolt — always draw
       ctx.globalAlpha = coreAlpha * branch.alpha;
       ctx.strokeStyle = flashPhase > 0.3 ? "#FFFFFF" : "#AADDFF";
-      ctx.lineWidth = branch.width * Math.max(0.3, 1 - fadePhase * 0.7);
+      ctx.lineWidth = (branch.width + (_isMobilePerfMode ? 2 : 0)) * Math.max(0.3, 1 - fadePhase * 0.7);
       ctx.shadowColor = "#FFFFFF";
-      ctx.shadowBlur = flashPhase > 0 ? 20 : 6;
+      ctx.shadowBlur = _isMobilePerfMode ? 0 : (flashPhase > 0 ? 20 : 6);
       drawBranch(branch.pts);
 
       // Wall impact sparks at the last point
@@ -5060,62 +5095,56 @@ function drawEffects(ctx) {
     });
   }
 
-  // Draw Electric Ray aura glow
-  fishes.forEach(fish => {
-    if (!fish.isRay || !fish.alive) return;
-    const pos = pathPos(fish.pts, fish.t + fish.tOffset);
-    const pulse = 0.5 + 0.5 * Math.sin(animTime * 5 + fish.animTime);
-    ctx.save();
-    const r = fish.size * 0.55 + pulse * 20;
-    const grad = ctx.createRadialGradient(pos.x, pos.y, r*0.2, pos.x, pos.y, r);
-    grad.addColorStop(0, `rgba(120,220,255,${0.25*pulse})`);
-    grad.addColorStop(0.5, `rgba(60,140,255,${0.12*pulse})`);
-    grad.addColorStop(1, "rgba(20,80,200,0)");
-    ctx.fillStyle = grad;
-    ctx.beginPath(); ctx.arc(pos.x, pos.y, r, 0, Math.PI*2); ctx.fill();
-    // Electric arc flickers around it
-    if (Math.random() < 0.3) {
-      const a1 = Math.random()*Math.PI*2;
-      const a2 = a1 + (Math.random()-0.5)*1.2;
-      ctx.globalAlpha = 0.5*pulse;
-      ctx.strokeStyle = "#88EEFF";
-      ctx.lineWidth = 1.5;
-      ctx.shadowColor = "#00AAFF"; ctx.shadowBlur = 10;
-      ctx.beginPath();
-      ctx.moveTo(pos.x + Math.cos(a1)*(r*0.5), pos.y + Math.sin(a1)*(r*0.5));
-      ctx.lineTo(pos.x + Math.cos(a1)*(r*0.9) + (Math.random()-0.5)*20,
-                 pos.y + Math.sin(a1)*(r*0.9) + (Math.random()-0.5)*20);
-      ctx.stroke();
-    }
-    ctx.restore();
-  });
+  // Draw Electric Ray aura glow (skip heavy gradients on mobile)
+  if (!_isMobilePerfMode) {
+    fishes.forEach(fish => {
+      if (!fish.isRay || !fish.alive) return;
+      const pos = pathPos(fish.pts, fish.t + fish.tOffset);
+      const pulse = 0.5 + 0.5 * Math.sin(animTime * 5 + fish.animTime);
+      ctx.save();
+      const r = fish.size * 0.55 + pulse * 20;
+      const grad = ctx.createRadialGradient(pos.x, pos.y, r*0.2, pos.x, pos.y, r);
+      grad.addColorStop(0, `rgba(120,220,255,${0.25*pulse})`);
+      grad.addColorStop(0.5, `rgba(60,140,255,${0.12*pulse})`);
+      grad.addColorStop(1, "rgba(20,80,200,0)");
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.arc(pos.x, pos.y, r, 0, Math.PI*2); ctx.fill();
+      if (Math.random() < 0.3) {
+        const a1 = Math.random()*Math.PI*2;
+        ctx.globalAlpha = 0.5*pulse;
+        ctx.strokeStyle = "#88EEFF"; ctx.lineWidth = 1.5;
+        ctx.shadowColor = "#00AAFF"; ctx.shadowBlur = 10;
+        ctx.beginPath();
+        ctx.moveTo(pos.x + Math.cos(a1)*(r*0.5), pos.y + Math.sin(a1)*(r*0.5));
+        ctx.lineTo(pos.x + Math.cos(a1)*(r*0.9) + (Math.random()-0.5)*20,
+                   pos.y + Math.sin(a1)*(r*0.9) + (Math.random()-0.5)*20);
+        ctx.stroke();
+      }
+      ctx.restore();
+    });
+  }
 
-  // Draw immortal croc aura and label
+  // Draw immortal croc label (skip aura gradient on mobile)
   fishes.forEach(fish => {
     if (!fish.isImmortal || !fish.alive) return;
     const pos = pathPos(fish.pts, fish.t + fish.tOffset);
     const pulse = 0.4 + 0.6 * Math.sin(animTime * 2.5);
     ctx.save();
-    // Dark aura under body
-    const auraR = fish.crocW * 0.5 + pulse * 25;
-    const grad = ctx.createRadialGradient(pos.x, pos.y, auraR*0.2, pos.x, pos.y, auraR);
-    grad.addColorStop(0, `rgba(80,200,40,${0.18*pulse})`);
-    grad.addColorStop(0.5, `rgba(30,100,10,${0.10})`);
-    grad.addColorStop(1, "rgba(0,50,0,0)");
-    ctx.fillStyle = grad;
-    ctx.beginPath(); ctx.ellipse(pos.x, pos.y, auraR, auraR*0.35, 0, 0, Math.PI*2); ctx.fill();
-
-    // "IMMORTAL" label above
+    if (!_isMobilePerfMode) {
+      const auraR = fish.crocW * 0.5 + pulse * 25;
+      const grad = ctx.createRadialGradient(pos.x, pos.y, auraR*0.2, pos.x, pos.y, auraR);
+      grad.addColorStop(0, `rgba(80,200,40,${0.18*pulse})`);
+      grad.addColorStop(0.5, `rgba(30,100,10,0.10)`);
+      grad.addColorStop(1, "rgba(0,50,0,0)");
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.ellipse(pos.x, pos.y, auraR, auraR*0.35, 0, 0, Math.PI*2); ctx.fill();
+    }
     ctx.globalAlpha = 0.7 + 0.3*pulse;
     ctx.fillStyle = "#88FF44";
-    ctx.strokeStyle = "#003300";
-    ctx.lineWidth = 3;
-    ctx.font = "bold 18px Arial";
-    ctx.textAlign = "center";
-    ctx.shadowColor = "#00FF44"; ctx.shadowBlur = 10;
-    ctx.strokeText("☠ IMMORTAL", pos.x, pos.y - fish.crocH*0.55 - 10);
-    ctx.fillText("☠ IMMORTAL", pos.x, pos.y - fish.crocH*0.55 - 10);
+    ctx.font = "bold 18px Arial"; ctx.textAlign = "center";
+    if (!_isMobilePerfMode) { ctx.strokeStyle="#003300"; ctx.lineWidth=3; ctx.shadowColor="#00FF44"; ctx.shadowBlur=10; ctx.strokeText("☠ IMMORTAL", pos.x, pos.y - fish.crocH*0.55 - 10); }
     ctx.shadowBlur = 0;
+    ctx.fillText("☠ IMMORTAL", pos.x, pos.y - fish.crocH*0.55 - 10);
     ctx.restore();
   });
 
@@ -5153,39 +5182,24 @@ function drawEffects(ctx) {
         ctx.stroke();
       }
 
-      // Layer 1: Very thick dark smoke exhaust (80px)
-      ctx.globalAlpha = fadeAlpha * 0.3;
-      ctx.strokeStyle = "rgba(50,45,40,0.6)";
-      ctx.lineWidth = 80;
-      drawSmoothTrail(d.trail);
-
-      // Layer 2: Medium warm brown smoke (55px)
-      ctx.globalAlpha = fadeAlpha * 0.25;
-      ctx.strokeStyle = "rgba(140,90,40,0.5)";
-      ctx.lineWidth = 55;
-      drawSmoothTrail(d.trail);
-
-      // Layer 3: Fire/heat core (30px, orange-red glow)
-      ctx.globalAlpha = fadeAlpha * 0.3;
-      ctx.strokeStyle = "rgba(255,120,20,0.5)";
-      ctx.lineWidth = 30;
-      ctx.shadowColor = "#FF6600";
-      ctx.shadowBlur = 20;
-      drawSmoothTrail(d.trail);
-
-      // Layer 4: Bright energy core (12px, cyan)
+      if (!_isMobilePerfMode) {
+        // Full 5-layer smoke (desktop only)
+        ctx.globalAlpha = fadeAlpha * 0.3;
+        ctx.strokeStyle = "rgba(50,45,40,0.6)"; ctx.lineWidth = 80; drawSmoothTrail(d.trail);
+        ctx.globalAlpha = fadeAlpha * 0.25;
+        ctx.strokeStyle = "rgba(140,90,40,0.5)"; ctx.lineWidth = 55; drawSmoothTrail(d.trail);
+        ctx.globalAlpha = fadeAlpha * 0.3;
+        ctx.strokeStyle = "rgba(255,120,20,0.5)"; ctx.lineWidth = 30;
+        ctx.shadowColor = "#FF6600"; ctx.shadowBlur = 20; drawSmoothTrail(d.trail);
+      }
+      // Energy core (always drawn)
       ctx.globalAlpha = fadeAlpha * 0.6;
-      ctx.strokeStyle = "#00ccff";
-      ctx.lineWidth = 12;
-      ctx.shadowColor = "#00ddff";
-      ctx.shadowBlur = 18;
+      ctx.strokeStyle = "#00ccff"; ctx.lineWidth = _isMobilePerfMode ? 8 : 12;
+      ctx.shadowColor = "#00ddff"; ctx.shadowBlur = _isMobilePerfMode ? 0 : 18;
       drawSmoothTrail(d.trail);
-
-      // Layer 5: White-hot center line (3px)
+      // White center
       ctx.globalAlpha = fadeAlpha * 0.85;
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 3;
-      ctx.shadowBlur = 0;
+      ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 3; ctx.shadowBlur = 0;
       drawSmoothTrail(d.trail);
 
       // Bounce markers (big fire impact bursts)
@@ -6038,10 +6052,17 @@ function setupInput() {
 // ============================================================
 // GAME LOOP
 // ============================================================
+let _lastFPS = 60, _frameCount = 0, _fpsTime = 0;
 function gameLoop(dt) {
   buttons = [];
   update(dt);
-  drawBackgroundSliceDistortion(); // Background with coral sway on underlay canvas
+
+  // FPS tracking
+  _frameCount++;
+  _fpsTime += dt;
+  if (_fpsTime >= 1.0) { _lastFPS = _frameCount; _frameCount = 0; _fpsTime = 0; }
+
+  drawBackgroundSliceDistortion();
   updateBossWavesPixi();
   drawOverlay();
 }
