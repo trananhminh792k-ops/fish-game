@@ -3420,15 +3420,17 @@ async function init() {
   app = new PIXI.Application();
   // WebGL is 5-10x faster than canvas for sprites — use it on all devices
   // Falls back to canvas automatically if WebGL unavailable
-  const isMobile = window.innerWidth < 900 || ('ontouchstart' in window);
+  // Detect mobile for performance branching (used throughout)
+  // Note: do NOT use resolution > 1 or autoDensity here —
+  // our manual CSS + canvas sizing handles all coordinate mapping
   await app.init({
-    preference: "webgl",
+    preference: "webgl",   // GPU-accelerated; falls back to canvas automatically
     width: window.innerWidth,
     height: window.innerHeight,
     backgroundAlpha: 0,
-    antialias: !isMobile,  // disable antialiasing on mobile for speed
-    resolution: Math.min(window.devicePixelRatio || 1, isMobile ? 1 : 2),
-    autoDensity: true,
+    antialias: false,      // off on all devices — sprites look fine, saves GPU
+    resolution: 1,         // always 1; we handle DPR manually via CSS scaling
+    autoDensity: false,    // off — we set canvas CSS ourselves after init
   });
   document.body.appendChild(app.canvas);
   app.canvas.style.cssText = "display:block;position:absolute;top:0;left:0;";
@@ -4057,22 +4059,23 @@ function killFish(fish, pos) {
       isRay: !!fish.isRay,
     };
   }
-  for (let i = 0; i < 20; i++) {
+  const _pCount = _isMobilePerfMode ? 6 : 20;
+  const _cCount = _isMobilePerfMode ? 3 : 8;
+  for (let i = 0; i < _pCount; i++) {
     const a = Math.random()*Math.PI*2, spd = 80+Math.random()*250;
     particles.push({ type:"explosion_particle", x:pos.x, y:pos.y,
       vx:Math.cos(a)*spd, vy:Math.sin(a)*spd, life:0.3+Math.random()*0.4,
       maxLife:0.7, radius:4+Math.random()*8, hue:30+Math.random()*30 });
   }
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < _cCount; i++) {
     const a = Math.random()*Math.PI*2, spd = 80+Math.random()*180;
-    // Coins burst out briefly, then fly to the balance display (top-left of HUD)
-    const targetX = 60; // coin icon position in HUD
+    const targetX = 60;
     const targetY = GH - HUD_H + 38;
     particles.push({ type:"coin_fly", x:pos.x, y:pos.y,
       vx:Math.cos(a)*spd, vy:Math.sin(a)*spd-120,
       targetX, targetY,
-      life:1.5, maxLife:1.5, phase:"burst", // burst then fly
-      burstTime: 0.3 + Math.random()*0.2, // how long to burst before flying
+      life:1.5, maxLife:1.5, phase:"burst",
+      burstTime: 0.3 + Math.random()*0.2,
       animTime:Math.random()*10 });
   }
   if (fish.isBoss) {
@@ -4533,7 +4536,8 @@ function update(dt) {
         d.vy *= scale;
       }
       // Bounce sparks
-      for (let i = 0; i < 12; i++) {
+      const _bSparkN = _isMobilePerfMode ? 4 : 12;
+      for (let i = 0; i < _bSparkN; i++) {
         const a = Math.random() * Math.PI * 2;
         particles.push({ type: "fire_particle", x: d.x, y: d.y,
           vx: Math.cos(a)*250, vy: Math.sin(a)*250,
@@ -4775,9 +4779,18 @@ function drawBackgroundSliceDistortion() {
 // ============================================================
 // OVERLAY DRAW (Canvas 2D for HUD, effects, crosshair)
 // ============================================================
+let _overlayLastDraw = 0;
 function drawOverlay() {
   const w = canvasOverlay.width, h = canvasOverlay.height;
   const ctx = ctxOverlay;
+
+  // On mobile, cap overlay at 30fps — game logic still runs at full speed
+  if (_isMobilePerfMode) {
+    const now = performance.now();
+    if (now - _overlayLastDraw < 33) return; // ~30fps
+    _overlayLastDraw = now;
+  }
+
   ctx.clearRect(0, 0, w, h);
 
   const s = gameContainer._gameScale || 1;
@@ -5072,8 +5085,8 @@ function drawEffects(ctx) {
     ctx.restore();
   });
 
-  // In aim pick mode: highlight all fish with a subtle white rim so player knows to click them
-  if (aimPickMode) {
+  // In aim pick mode: highlight all fish (skip on mobile — too many draw calls)
+  if (aimPickMode && !_isMobilePerfMode) {
     fishes.forEach(fish => {
       if (!fish.alive) return;
       const pos = pathPos(fish.pts, fish.t + fish.tOffset);
@@ -5238,77 +5251,65 @@ function drawParticles(ctx) {
       const isBurst = p.burstTime > 0;
       const coinSize = isBurst ? 8 : 7;
       ctx.globalAlpha = Math.min(1, alpha * 1.5);
-
-      // Glow trail when flying
-      if (!isBurst) {
-        ctx.shadowColor = "#FFD700";
-        ctx.shadowBlur = 12;
-      }
-
-      // Gold coin body
       ctx.fillStyle = "#FFD700";
       ctx.beginPath();
       ctx.arc(p.x, p.y, coinSize, 0, Math.PI*2);
       ctx.fill();
-
-      // Coin rim
-      ctx.strokeStyle = "#B8860B";
-      ctx.lineWidth = 1.5;
-      ctx.shadowBlur = 0;
-      ctx.stroke();
-
-      // $ symbol on larger coins
-      if (coinSize >= 7) {
-        ctx.fillStyle = "#B8860B";
-        ctx.font = `bold ${coinSize}px Arial`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText("$", p.x, p.y + 1);
-      }
-
-      // Sparkle trail when flying
-      if (!isBurst && Math.random() < 0.3) {
-        ctx.globalAlpha = 0.4;
-        ctx.fillStyle = "#FFF";
-        ctx.beginPath();
-        ctx.arc(p.x + (Math.random()-0.5)*10, p.y + (Math.random()-0.5)*10, 2, 0, Math.PI*2);
-        ctx.fill();
+      if (!_isMobilePerfMode) {
+        // Glow trail (desktop only)
+        if (!isBurst) { ctx.shadowColor = "#FFD700"; ctx.shadowBlur = 12; }
+        ctx.strokeStyle = "#B8860B"; ctx.lineWidth = 1.5; ctx.shadowBlur = 0; ctx.stroke();
+        if (coinSize >= 7) {
+          ctx.fillStyle = "#B8860B"; ctx.font = `bold ${coinSize}px Arial`;
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillText("$", p.x, p.y + 1);
+        }
+        if (!isBurst && Math.random() < 0.3) {
+          ctx.globalAlpha = 0.4; ctx.fillStyle = "#FFF";
+          ctx.beginPath(); ctx.arc(p.x+(Math.random()-.5)*10, p.y+(Math.random()-.5)*10, 2, 0, Math.PI*2); ctx.fill();
+        }
       }
       ctx.restore();
     } else if (p.type === "fire_particle") {
-      // Fire: bright orange/yellow core fading to dark red
       ctx.save();
       const progress = 1 - p.life/p.maxLife;
       ctx.globalAlpha = alpha * 0.85;
       const r = p.radius * (0.3 + alpha * 0.7);
-      const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
-      if (progress < 0.4) {
-        grad.addColorStop(0, `rgba(255,255,200,${alpha})`);
-        grad.addColorStop(0.3, `rgba(255,200,50,${alpha*0.8})`);
-        grad.addColorStop(0.7, `rgba(255,100,20,${alpha*0.4})`);
-        grad.addColorStop(1, "rgba(200,30,0,0)");
+      if (_isMobilePerfMode) {
+        // Simple solid circle on mobile — no radial gradient
+        ctx.fillStyle = progress < 0.4 ? `rgba(255,180,30,${alpha})` : `rgba(255,100,20,${alpha*0.7})`;
+        ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI*2); ctx.fill();
       } else {
-        grad.addColorStop(0, `rgba(255,150,30,${alpha*0.7})`);
-        grad.addColorStop(0.5, `rgba(200,60,10,${alpha*0.3})`);
-        grad.addColorStop(1, "rgba(100,20,0,0)");
+        const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
+        if (progress < 0.4) {
+          grad.addColorStop(0, `rgba(255,255,200,${alpha})`);
+          grad.addColorStop(0.3, `rgba(255,200,50,${alpha*0.8})`);
+          grad.addColorStop(0.7, `rgba(255,100,20,${alpha*0.4})`);
+          grad.addColorStop(1, "rgba(200,30,0,0)");
+        } else {
+          grad.addColorStop(0, `rgba(255,150,30,${alpha*0.7})`);
+          grad.addColorStop(0.5, `rgba(200,60,10,${alpha*0.3})`);
+          grad.addColorStop(1, "rgba(100,20,0,0)");
+        }
+        ctx.fillStyle = grad;
+        ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI*2); ctx.fill();
       }
-      ctx.fillStyle = grad;
-      ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI*2); ctx.fill();
       ctx.restore();
     } else if (p.type === "smoke_particle") {
-      // Smoke: dark expanding blobs that rise and fade
-      ctx.save();
-      const progress = 1 - p.life/p.maxLife;
-      ctx.globalAlpha = alpha * 0.35 * (1 - progress*0.5);
-      const r = p.radius;
-      const brightness = 30 + progress * 40;
-      const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
-      grad.addColorStop(0, `rgba(${brightness},${brightness},${brightness+10},0.6)`);
-      grad.addColorStop(0.6, `rgba(${brightness},${brightness},${brightness},0.3)`);
-      grad.addColorStop(1, `rgba(${brightness},${brightness},${brightness},0)`);
-      ctx.fillStyle = grad;
-      ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI*2); ctx.fill();
-      ctx.restore();
+      if (_isMobilePerfMode) { /* skip smoke on mobile */ } else {
+        ctx.save();
+        const progress = 1 - p.life/p.maxLife;
+        ctx.globalAlpha = alpha * 0.35 * (1 - progress*0.5);
+        const r = p.radius;
+        const brightness = 30 + progress * 40;
+        const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
+        grad.addColorStop(0, `rgba(${brightness},${brightness},${brightness+10},0.6)`);
+        grad.addColorStop(0.6, `rgba(${brightness},${brightness},${brightness},0.3)`);
+        grad.addColorStop(1, `rgba(${brightness},${brightness},${brightness},0)`);
+        ctx.fillStyle = grad;
+        ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI*2); ctx.fill();
+        ctx.restore();
+      }
     }
   });
 }
