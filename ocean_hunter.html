@@ -3035,12 +3035,18 @@ const AudioMgr = {
   },
 
   // Play a sound by name. Returns the playing Audio node (or null).
+  _lastPlay: {},   // throttle rapid-fire sounds on mobile
   play(name, opts = {}) {
     if (this._muted || !this._started) return null;
     const snd = this.sounds[name];
     if (!snd) return null;
+    // On mobile, throttle bullet/laser sounds — cloneNode is expensive
+    if (_mob && (name === 'sfx_bullet_fire' || name === 'sfx_laser_fire' || name === 'sfx_fish_hit')) {
+      const now = performance.now();
+      if (now - (this._lastPlay[name] || 0) < 120) return null; // max ~8/sec
+      this._lastPlay[name] = now;
+    }
     try {
-      // Clone so same sound can overlap itself (e.g. rapid bullet fire)
       const node = snd.cloneNode(true);
       node.volume = Math.max(0, Math.min(1, (opts.vol ?? 1.0) * this._vol));
       if (opts.loop) node.loop = true;
@@ -3565,6 +3571,31 @@ async function init() {
   gameContainer.addChild(bossContainer);
   gameContainer.addChild(effectsContainer);
 
+  // ── Sprite pools: reuse bullet/net sprites instead of creating per-shot ────
+  const _bulletPool = [], _netPool = [];
+  window._getBulletSprite = function() {
+    const s = _bulletPool.pop();
+    if (s) { effectsContainer.addChild(s); return s; }
+    const sp = new PIXI.Sprite(getTexture('360p_21_ENERGY_BULLET', 0));
+    sp.anchor.set(0.5); sp.scale.set(0.7); effectsContainer.addChild(sp); return sp;
+  };
+  window._getNetSprite = function() {
+    const s = _netPool.pop();
+    if (s) { effectsContainer.addChild(s); return s; }
+    const sp = new PIXI.Sprite(getTexture('360p_22_CAPTURE_NET', 0));
+    sp.anchor.set(0.5); effectsContainer.addChild(sp); return sp;
+  };
+  window._returnBulletSprite = function(s) {
+    if (!s) return;
+    if (s.parent) s.parent.removeChild(s);
+    _bulletPool.length < 20 ? _bulletPool.push(s) : s.destroy();
+  };
+  window._returnNetSprite = function(s) {
+    if (!s) return;
+    if (s.parent) s.parent.removeChild(s);
+    _netPool.length < 8 ? _netPool.push(s) : s.destroy();
+  };
+
   // Input
   setupInput();
   loadExplosionSprites();
@@ -3799,9 +3830,9 @@ function shootAimLocked(targetFish) {
   }
   if (currentWeapon === 'net') {
     // Net: goes to target, only explodes on that fish
-    const sprite = new PIXI.Sprite(getTexture('360p_22_CAPTURE_NET', 0));
-    sprite.anchor.set(0.5);
-    effectsContainer.addChild(sprite);
+    const sprite = window._getNetSprite ? window._getNetSprite() : (() => {
+      const s = new PIXI.Sprite(getTexture('360p_22_CAPTURE_NET', 0)); s.anchor.set(0.5); effectsContainer.addChild(s); return s;
+    })();
     projectiles.push({
       type:'net_locked', x:tipX, y:tipY, tx:tp.x, ty:tp.y,
       vx:Math.cos(angle)*WEAPONS.net.speed,
@@ -3812,10 +3843,9 @@ function shootAimLocked(targetFish) {
     return;
   }
   // Bullet: flies to target, only collides with that fish
-  const sprite = new PIXI.Sprite(getTexture('360p_21_ENERGY_BULLET', 0));
-  sprite.anchor.set(0.5);
-  sprite.scale.set(0.7);
-  effectsContainer.addChild(sprite);
+  const sprite = window._getBulletSprite ? window._getBulletSprite() : (() => {
+    const s = new PIXI.Sprite(getTexture('360p_21_ENERGY_BULLET', 0)); s.anchor.set(0.5); s.scale.set(0.7); effectsContainer.addChild(s); return s;
+  })();
   projectiles.push({
     type:'bullet_locked', x:tipX, y:tipY,
     vx:Math.cos(angle)*WEAPONS.bullet.speed,
@@ -3842,10 +3872,9 @@ function shoot() {
 
   if (currentWeapon === "bullet") {
     AudioMgr.play("sfx_bullet_fire", {vol: 0.6});
-    const sprite = new PIXI.Sprite(getTexture("360p_21_ENERGY_BULLET", 0));
-    sprite.anchor.set(0.5);
-    sprite.scale.set(0.7); // reasonable bullet size
-    effectsContainer.addChild(sprite);
+    const sprite = window._getBulletSprite ? window._getBulletSprite() : (() => {
+      const s = new PIXI.Sprite(getTexture("360p_21_ENERGY_BULLET", 0)); s.anchor.set(0.5); s.scale.set(0.7); effectsContainer.addChild(s); return s;
+    })();
     projectiles.push({
       type:"bullet", x:tipX, y:tipY,
       vx:Math.cos(angle)*WEAPONS.bullet.speed,
@@ -3854,9 +3883,9 @@ function shoot() {
     });
   } else if (currentWeapon === "net") {
     AudioMgr.play("sfx_net_fire", {vol: 0.7});
-    const sprite = new PIXI.Sprite(getTexture("360p_22_CAPTURE_NET", 0));
-    sprite.anchor.set(0.5);
-    effectsContainer.addChild(sprite);
+    const sprite = window._getNetSprite ? window._getNetSprite() : (() => {
+      const s = new PIXI.Sprite(getTexture("360p_22_CAPTURE_NET", 0)); s.anchor.set(0.5); effectsContainer.addChild(s); return s;
+    })();
     projectiles.push({
       type:"net", x:tipX, y:tipY, tx:mouseX, ty:mouseY,
       vx:Math.cos(angle)*WEAPONS.net.speed,
@@ -4356,11 +4385,14 @@ function update(dt) {
     p.x += p.vx*dt; p.y += p.vy*dt; p.animTime += dt;
     if (p.x < -100 || p.x > GW+100 || p.y < -100 || p.y > GH+100) { p.alive = false; return; }
 
-    // Update sprite
+    // Update sprite position (skip texture animation on mobile — use frame 0)
+    if (!p.sprite) return;
     const isBullet = p.type === "bullet" || p.type === "bullet_locked";
     const isNet    = p.type === "net"    || p.type === "net_locked";
-    const tex = getTexture(isBullet ? "360p_21_ENERGY_BULLET" : "360p_22_CAPTURE_NET", p.animTime);
-    if (tex) p.sprite.texture = tex;
+    if (!_isMobilePerfMode) {
+      const tex = getTexture(isBullet ? "360p_21_ENERGY_BULLET" : "360p_22_CAPTURE_NET", p.animTime);
+      if (tex) p.sprite.texture = tex;
+    }
     p.sprite.position.set(p.x, p.y);
     if (isBullet) p.sprite.rotation = Math.atan2(p.vy, p.vx);
 
@@ -4436,9 +4468,13 @@ function update(dt) {
 
   // Remove dead projectiles
   projectiles.forEach(p => {
-    if (!p.alive && p.sprite.parent) {
-      p.sprite.parent.removeChild(p.sprite);
-      p.sprite.destroy();
+    if (!p.alive && p.sprite) {
+      const isBullet = p.type === "bullet" || p.type === "bullet_locked";
+      const isNet    = p.type === "net"    || p.type === "net_locked";
+      if (isBullet && window._returnBulletSprite) window._returnBulletSprite(p.sprite);
+      else if (isNet && window._returnNetSprite)   window._returnNetSprite(p.sprite);
+      else { if (p.sprite.parent) p.sprite.parent.removeChild(p.sprite); try { p.sprite.destroy(); } catch(e){} }
+      p.sprite = null;
     }
   });
   projectiles = projectiles.filter(p => p.alive);
@@ -4667,8 +4703,23 @@ function update(dt) {
     if (autoFireTarget && autoFireTarget.alive) {
       const tp = pathPos(autoFireTarget.pts, autoFireTarget.t + autoFireTarget.tOffset);
       mouseX = tp.x; mouseY = tp.y;
+      cannonAngle = Math.atan2(tp.y - cy, tp.x - cx);
       if (now*1000 - lastFireTime > FIRE_COOLDOWNS[currentWeapon]) {
-        shoot(); lastFireTime = now*1000;
+        if (_isMobilePerfMode && currentWeapon === 'bullet') {
+          // Mobile: instant-hit — no projectile in flight, no homing physics
+          const cost = bet * WEAPONS.bullet.costMult;
+          if (coins >= cost) {
+            coins -= cost;
+            recoil = 10; muzzleFlash = 0.3;
+            AudioMgr.play("sfx_bullet_fire", {vol: 0.6});
+            effects.push({ type:'laser_beam', x1: cx + Math.cos(cannonAngle)*95, y1: cy + Math.sin(cannonAngle)*95,
+              x2: tp.x, y2: tp.y, life: 0.08, maxLife: 0.08 });
+            tryKillFish(autoFireTarget, tp);
+            lastFireTime = now*1000;
+          }
+        } else {
+          shoot(); lastFireTime = now*1000;
+        }
       }
     }
   }
@@ -4703,7 +4754,22 @@ function update(dt) {
       mouseX = tp.x; mouseY = tp.y;
       cannonAngle = Math.atan2(tp.y - cy, tp.x - cx);
       if (now*1000 - lastFireTime > FIRE_COOLDOWNS[currentWeapon]) {
-        shootAimLocked(aimLockTarget); lastFireTime = now*1000;
+        if (_isMobilePerfMode && currentWeapon === 'bullet') {
+          // Mobile: instant-hit beam instead of homing projectile — no per-frame physics cost
+          const cost = bet * WEAPONS.bullet.costMult;
+          if (coins >= cost) {
+            coins -= cost;
+            recoil = 10; muzzleFlash = 0.3;
+            AudioMgr.play("sfx_bullet_fire", {vol: 0.6});
+            // Show a quick flash beam (ultra-cheap visual)
+            effects.push({ type:'laser_beam', x1: cx + Math.cos(cannonAngle)*95, y1: cy + Math.sin(cannonAngle)*95,
+              x2: tp.x, y2: tp.y, life: 0.08, maxLife: 0.08 });
+            tryKillFish(aimLockTarget, tp);
+            lastFireTime = now*1000;
+          }
+        } else {
+          shootAimLocked(aimLockTarget); lastFireTime = now*1000;
+        }
       }
     }
   }
