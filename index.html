@@ -8,9 +8,190 @@
 * { margin:0; padding:0; box-sizing:border-box; }
 body { background:#000; overflow:hidden; touch-action:none; }
 canvas { display:block; }
+
+/* ── Loading screen ─────────────────────────────── */
+#loading-screen {
+  position:fixed; inset:0; z-index:9999;
+  background: linear-gradient(160deg, #020d1f 0%, #041530 40%, #020a18 100%);
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  font-family: Arial, sans-serif; color:#fff;
+  transition: opacity 0.8s ease;
+}
+#loading-screen.fade-out { opacity:0; pointer-events:none; }
+
+#loading-title {
+  font-size: clamp(2rem, 6vw, 4rem);
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  background: linear-gradient(180deg, #ffe566 0%, #ffa500 60%, #ff6600 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  text-shadow: none;
+  margin-bottom: 6px;
+  filter: drop-shadow(0 0 18px rgba(255,180,0,0.7));
+}
+#loading-subtitle {
+  font-size: clamp(0.85rem, 2vw, 1.1rem);
+  color: #88ccff;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  margin-bottom: 36px;
+}
+
+/* Slideshow */
+#loading-slides {
+  position: relative;
+  width: min(90vw, 640px);
+  aspect-ratio: 16/9;
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 0 40px rgba(0,120,255,0.35), 0 0 0 2px rgba(255,200,50,0.25);
+  margin-bottom: 32px;
+  background: #020d1f;
+}
+#loading-slides img {
+  position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
+  opacity:0; transition: opacity 1s ease;
+  border-radius:14px;
+}
+#loading-slides img.active { opacity:1; }
+
+/* Slide caption */
+#slide-caption {
+  position:absolute; bottom:0; left:0; right:0;
+  padding: 10px 18px 14px;
+  background: linear-gradient(transparent, rgba(0,5,20,0.85));
+  font-size: clamp(0.75rem, 1.8vw, 0.95rem);
+  color: #aad4ff;
+  text-align: center;
+  letter-spacing:0.04em;
+}
+
+/* Progress bar */
+#loading-progress-wrap {
+  width: min(90vw, 640px);
+  display:flex; flex-direction:column; gap:10px;
+}
+#loading-bar-bg {
+  width:100%; height:12px; background:rgba(255,255,255,0.1);
+  border-radius:999px; overflow:hidden;
+  box-shadow: 0 0 0 1px rgba(255,200,50,0.2);
+}
+#loading-bar-fill {
+  height:100%; width:0%;
+  background: linear-gradient(90deg, #0088ff, #00ccff, #ffd700);
+  border-radius:999px;
+  transition: width 0.25s ease;
+  box-shadow: 0 0 10px rgba(0,200,255,0.6);
+}
+#loading-status {
+  display:flex; justify-content:space-between;
+  font-size:0.82rem; color:rgba(255,255,255,0.55);
+}
+#loading-tip {
+  text-align:center; font-size:0.82rem;
+  color:rgba(150,200,255,0.6); margin-top:16px;
+  font-style:italic; min-height:1.2em;
+}
 </style>
 </head>
 <body>
+
+<!-- Loading Screen -->
+<div id="loading-screen">
+  <div id="loading-title">OCEAN HUNTER</div>
+  <div id="loading-subtitle">The Deep Sea Awaits</div>
+
+  <div id="loading-slides">
+    <img src="images/intro_01.webp" class="active" alt="Ocean Hunter — Boss creatures">
+    <img src="images/intro_02.webp" alt="Ocean Hunter — Special creatures">
+    <img src="images/intro_03.webp" alt="Ocean Hunter — Sea creatures">
+    <div id="slide-caption">Hunt the depths. Claim the treasure.</div>
+  </div>
+
+  <div id="loading-progress-wrap">
+    <div id="loading-bar-bg">
+      <div id="loading-bar-fill"></div>
+    </div>
+    <div id="loading-status">
+      <span id="loading-label">Loading assets…</span>
+      <span id="loading-pct">0%</span>
+    </div>
+  </div>
+  <div id="loading-tip">Tip: Use the Aim button to lock onto high-value targets!</div>
+</div>
+
+<script>
+// ── Loading screen controller ─────────────────────────────────────────────────
+const TIPS = [
+  "Tip: Use the Aim button to lock onto any creature on screen!",
+  "Tip: Electric Ray kills chain lightning to nearby fish!",
+  "Tip: The Ancient Croc is immortal — hit it to earn credits!",
+  "Tip: Auto mode always targets the highest multiplier fish!",
+  "Tip: Drill Lobster launches a bouncing bomb when killed!",
+  "Tip: Golden Toad ×100 triggers the Bonus Prize Wheel!",
+  "Tip: Net weapon hits all fish within 160px of impact!",
+  "Tip: Laser beam instantly hits every fish along its path!",
+  "Tip: Higher bets = bigger rewards from every kill!",
+];
+const CAPTIONS = [
+  "The Golden Toad reigns supreme — ×100 multiplier!",
+  "⚡ Electric Ray & ☠ Ancient Croc — special bosses!",
+  "Dozens of sea creatures to hunt and collect!",
+];
+
+const loadingEl    = document.getElementById('loading-screen');
+const barFill      = document.getElementById('loading-bar-fill');
+const pctEl        = document.getElementById('loading-pct');
+const labelEl      = document.getElementById('loading-label');
+const tipEl        = document.getElementById('loading-tip');
+const captionEl    = document.getElementById('slide-caption');
+const slideImgs    = document.querySelectorAll('#loading-slides img');
+
+let slideIdx = 0, tipIdx = 0;
+
+function updateProgress(done, total) {
+  const pct = Math.round((done / total) * 100);
+  barFill.style.width = pct + '%';
+  pctEl.textContent   = pct + '%';
+  if (pct < 30)       labelEl.textContent = 'Loading sprites…';
+  else if (pct < 70)  labelEl.textContent = 'Preparing game…';
+  else if (pct < 100) labelEl.textContent = 'Almost ready…';
+  else                labelEl.textContent = 'Ready!';
+}
+
+function hideLoadingScreen() {
+  barFill.style.width = '100%';
+  pctEl.textContent = '100%';
+  labelEl.textContent = 'Ready! Dive in!';
+  setTimeout(() => {
+    loadingEl.classList.add('fade-out');
+    setTimeout(() => { loadingEl.style.display = 'none'; }, 850);
+  }, 400);
+}
+
+// Cycle slides every 3s
+setInterval(() => {
+  slideImgs[slideIdx].classList.remove('active');
+  slideIdx = (slideIdx + 1) % slideImgs.length;
+  slideImgs[slideIdx].classList.add('active');
+  captionEl.textContent = CAPTIONS[slideIdx];
+}, 3000);
+
+// Cycle tips every 4s
+setInterval(() => {
+  tipIdx = (tipIdx + 1) % TIPS.length;
+  tipEl.style.opacity = '0';
+  setTimeout(() => { tipEl.textContent = TIPS[tipIdx]; tipEl.style.opacity = '1'; }, 400);
+}, 4000);
+tipEl.style.transition = 'opacity 0.4s ease';
+
+// Expose to game init
+window._loadingProgress  = updateProgress;
+window._loadingComplete  = hideLoadingScreen;
+</script>
+
 <script>
 // === PixiJS v8 ===
 var iB=Object.defineProperty;var u1=Object.getOwnPropertySymbols;var sB=Object.prototype.hasOwnProperty,nB=Object.prototype.propertyIsEnumerable;var c1=(d,ee,re)=>ee in d?iB(d,ee,{enumerable:!0,configurable:!0,writable:!0,value:re}):d[ee]=re,h1=(d,ee)=>{for(var re in ee||(ee={}))sB.call(ee,re)&&c1(d,re,ee[re]);if(u1)for(var re of u1(ee))nB.call(ee,re)&&c1(d,re,ee[re]);return d};/*!
@@ -3171,19 +3352,38 @@ function loadTextureFromDataURI(src) {
   });
 }
 
-async function loadTextures() {
+// Parallel image loading with progress callback
+async function loadTextures(onProgress) {
   const entries = Object.entries(ASSET_DATA);
-  for (const [key, asset] of entries) {
-    textures[key] = [];
-    for (const src of asset.frames) {
-      try {
-        const tex = await loadTextureFromDataURI(src);
-        textures[key].push(tex);
-      } catch(e) {
-        console.warn(`Failed to load frame for ${key}:`, e);
-      }
-    }
+
+  // Build flat list of all frames to load
+  const allFrames = [];
+  entries.forEach(([key, asset]) => {
+    textures[key] = new Array(asset.frames.length).fill(null);
+    asset.frames.forEach((src, idx) => allFrames.push({ key, idx, src }));
+  });
+
+  const BATCH = 16; // load 16 images in parallel — fast but avoids overwhelming the browser
+  let done = 0;
+  const total = allFrames.length;
+
+  for (let i = 0; i < allFrames.length; i += BATCH) {
+    const batch = allFrames.slice(i, i + BATCH);
+    await Promise.all(batch.map(({ key, idx, src }) =>
+      loadTextureFromDataURI(src)
+        .then(tex => { textures[key][idx] = tex; })
+        .catch(() => {})
+        .finally(() => {
+          done++;
+          if (onProgress) onProgress(done, total);
+        })
+    ));
   }
+
+  // Compact arrays (remove any nulls from failures)
+  entries.forEach(([key]) => {
+    textures[key] = textures[key].filter(Boolean);
+  });
 }
 
 function getTexture(key, time) {
@@ -3247,9 +3447,60 @@ async function init() {
   AudioMgr.loadSounds();
   AudioMgr.startBGM(); // will play after first user gesture
 
-  // Load textures
-  await loadTextures();
-  initEmbeddedTextures(); // Load embedded base64 textures for new creatures
+  // Load textures (parallel, with progress)
+  // Total = sprite frames + embedded creature frames (ray: 15, croc: 15)
+  const embeddedCount = RAY_FISH_FRAMES.length + CROC_FRAMES.length;
+  let embeddedDone = 0;
+
+  function onSpriteProgress(done, total) {
+    const overall = done + embeddedDone;
+    const overallTotal = total + embeddedCount;
+    if (window._loadingProgress) window._loadingProgress(overall, overallTotal);
+  }
+
+  await loadTextures(onSpriteProgress);
+
+  // Load embedded creature textures in parallel too
+  await new Promise(resolve => {
+    const paths = [...RAY_FISH_FRAMES, ...CROC_FRAMES];
+    const keys  = [
+      ...Array(RAY_FISH_FRAMES.length).fill("ELECTRIC_RAY"),
+      ...Array(CROC_FRAMES.length).fill("ANCIENT_CROC"),
+    ];
+    EMBEDDED_TEXTURES["ELECTRIC_RAY"] = new Array(RAY_FISH_FRAMES.length).fill(null);
+    EMBEDDED_TEXTURES["ANCIENT_CROC"] = new Array(CROC_FRAMES.length).fill(null);
+
+    const BATCH = 8;
+    let done = 0;
+    const total = paths.length;
+
+    // Index within each creature's array
+    let rayIdx = 0, crocIdx = 0;
+    const items = paths.map((src, i) => ({ src, key: keys[i], localIdx: keys[i] === "ELECTRIC_RAY" ? rayIdx++ : crocIdx++ }));
+
+    async function runBatches() {
+      for (let i = 0; i < items.length; i += BATCH) {
+        const batch = items.slice(i, i + BATCH);
+        await Promise.all(batch.map(({ src, key, localIdx }) =>
+          new Promise(res => {
+            const img = new Image();
+            img.onload = () => {
+              try { EMBEDDED_TEXTURES[key][localIdx] = PIXI.Texture.from(img); } catch(e) {}
+              done++; embeddedDone++;
+              const allDone = done; // sprite loading already finished
+              const spriteTotal = Object.values(ASSET_DATA).reduce((s,a) => s + a.frames.length, 0);
+              if (window._loadingProgress) window._loadingProgress(spriteTotal + embeddedDone, spriteTotal + embeddedCount);
+              res();
+            };
+            img.onerror = () => { done++; embeddedDone++; res(); };
+            img.src = src;
+          })
+        ));
+      }
+      resolve();
+    }
+    runBatches();
+  });
 
   // Background - create PixiJS sprite AND cache as Image for canvas slice distortion
   const bgTex = textures["31_DEEP_REEF_FLOOR"];
@@ -3321,6 +3572,9 @@ async function init() {
     }, 3000);
   }
   setTimeout(() => trySpawnNewCreatures(0), 500);
+
+  // Hide loading screen — game is ready
+  if (window._loadingComplete) window._loadingComplete();
 
   // Game loop
   app.ticker.add((ticker) => {
