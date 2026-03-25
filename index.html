@@ -2990,11 +2990,10 @@ const CROC_FRAMES = ["images/img_0411.webp", "images/img_0412.webp", "images/img
 //     sfx_bet_change   — click / tick sound
 //     sfx_button       — UI click
 
-// ── Audio file map: place files in a sounds/ folder next to ocean_hunter.html ──
-// Supported formats: .mp3 .ogg .wav  (use .mp3 for widest browser support)
+// ── Audio file map ────────────────────────────────────────────────────────────
 const SOUND_FILES = {
-  bgm_underwater:       "sounds/bgm_underwater.mp3",
-  sfx_bullet_fire:      "sounds/sfx_bullet_fire.mp3",
+  bgm_underwater:       "sounds/bgm_underwater.mp3",    // BGM: HTML Audio (loop)
+  sfx_bullet_fire:      "sounds/sfx_bullet_fire.mp3",   // SFX: Web Audio API (low-latency)
   sfx_net_fire:         "sounds/sfx_net_fire.mp3",
   sfx_laser_fire:       "sounds/sfx_laser_fire.mp3",
   sfx_fish_hit:         "sounds/sfx_fish_hit.mp3",
@@ -3013,82 +3012,107 @@ const SOUND_FILES = {
   sfx_bet_change:       "sounds/sfx_bet_change.mp3",
   sfx_button:           "sounds/sfx_button.mp3",
 };
+// BGM uses HTML Audio (needs loop/seek). All SFX use Web Audio API (zero-latency).
+const BGM_KEYS = new Set(["bgm_underwater"]);
 
 const AudioMgr = {
   _vol: 1.0,
-  _muted: false,     // legacy: mutes everything
-  _bgmOff: false,    // BGM specifically disabled
-  _sfxOff: false,    // SFX specifically disabled
+  _muted: false,
+  _bgmOff: false,
+  _sfxOff: false,
   _bgmNode: null,
+  _actx: null,
+  _buffers: {},
+  _htmlSounds: {},
   _started: false,
   _pendingBGM: false,
-  sounds: {},               // populated by loadSounds()
+  _lastPlay: {},
 
-  // Load all audio files. Call once at startup.
   loadSounds() {
     Object.entries(SOUND_FILES).forEach(([name, path]) => {
-      const a = new Audio();
-      a.preload = "auto";
-      // Silently ignore missing files — game plays fine without them
-      a.addEventListener("error", () => {}, { once: true });
-      a.src = path;
-      this.sounds[name] = a;
+      if (BGM_KEYS.has(name)) {
+        const a = new Audio();
+        a.preload = "auto";
+        a.addEventListener("error", () => {}, { once: true });
+        a.src = path;
+        this._htmlSounds[name] = a;
+      } else {
+        fetch(path)
+          .then(r => { if (!r.ok) throw new Error(); return r.arrayBuffer(); })
+          .then(buf => { const ax = this._getActx(); return ax ? ax.decodeAudioData(buf) : null; })
+          .then(decoded => { if (decoded) this._buffers[name] = decoded; })
+          .catch(() => {});
+      }
     });
   },
 
-  // Play a sound by name. Returns the playing Audio node (or null).
-  _lastPlay: {},
-  play(name, opts = {}) {
-    // Completely skip if SFX disabled — zero CPU cost
-    if (this._muted || this._sfxOff || !this._started) return null;
-    const snd = this.sounds[name];
-    if (!snd) return null;
-    // Throttle rapid bullet sounds on mobile
-    if (_mob && (name === 'sfx_bullet_fire' || name === 'sfx_laser_fire' || name === 'sfx_fish_hit')) {
-      const now = performance.now();
-      if (now - (this._lastPlay[name] || 0) < 150) return null;
-      this._lastPlay[name] = now;
+  _getActx() {
+    if (!this._actx) {
+      try { this._actx = new (window.AudioContext || window.webkitAudioContext)(); }
+      catch(e) { return null; }
     }
-    try {
-      const node = snd.cloneNode(true);
-      node.volume = Math.max(0, Math.min(1, (opts.vol ?? 1.0) * this._vol));
-      if (opts.loop) node.loop = true;
-      node.play().catch(() => {});
-      return node;
-    } catch (e) { return null; }
+    return this._actx;
   },
 
-  // Start background music. Safe to call before first user gesture — will
-  // auto-play as soon as the first interaction unlocks the AudioContext.
+  play(name, opts = {}) {
+    if (this._muted || this._sfxOff || !this._started) return null;
+    if (_mob) {
+      const limit = (name==='sfx_bullet_fire'||name==='sfx_laser_fire'||name==='sfx_fish_hit') ? 120
+                  : name==='sfx_bet_change' ? 200 : 0;
+      if (limit) {
+        const now = performance.now();
+        if (now - (this._lastPlay[name]||0) < limit) return null;
+        this._lastPlay[name] = now;
+      }
+    }
+    const buf = this._buffers[name];
+    const actx = this._getActx();
+    if (buf && actx) {
+      try {
+        if (actx.state === 'suspended') actx.resume();
+        const src = actx.createBufferSource();
+        src.buffer = buf;
+        const gain = actx.createGain();
+        gain.gain.value = Math.max(0, Math.min(1, (opts.vol ?? 1.0) * this._vol));
+        src.connect(gain); gain.connect(actx.destination);
+        src.start(0);
+        return src;
+      } catch(e) {}
+    }
+    return null;
+  },
+
   startBGM() {
     if (this._bgmNode) return;
     if (!this._started) { this._pendingBGM = true; return; }
-    if (this._bgmOff || this._muted) return;  // completely disabled — no node created
-    const snd = this.sounds.bgm_underwater;
+    if (this._bgmOff || this._muted) return;
+    const snd = this._htmlSounds.bgm_underwater;
     if (!snd) return;
-    this._bgmNode = snd.cloneNode(true);
-    this._bgmNode.loop   = true;
+    this._bgmNode = snd;
+    this._bgmNode.loop = true;
     this._bgmNode.volume = Math.max(0, Math.min(1, 0.35 * this._vol));
     this._bgmNode.play().catch(() => {});
   },
-  toggleBGM() {
-    this._bgmOff = !this._bgmOff;
-    if (this._bgmOff) { this.stopBGM(); }
-    else              { this.startBGM(); }
-  },
-  toggleSFX() {
-    this._sfxOff = !this._sfxOff;
-    // Nothing extra needed — play() checks _sfxOff on every call
-  },
 
   stopBGM() {
-    if (this._bgmNode) { try { this._bgmNode.pause(); } catch(e){} this._bgmNode = null; }
+    if (this._bgmNode) {
+      try { this._bgmNode.pause(); this._bgmNode.currentTime = 0; } catch(e) {}
+      this._bgmNode = null;
+    }
   },
 
-  // Must be called on first user interaction (click/touch) to unlock AudioContext.
+  toggleBGM() {
+    this._bgmOff = !this._bgmOff;
+    if (this._bgmOff) this.stopBGM(); else this.startBGM();
+  },
+
+  toggleSFX() { this._sfxOff = !this._sfxOff; },
+
   unlockAndStart() {
     if (this._started) return;
     this._started = true;
+    const actx = this._getActx();
+    if (actx && actx.state === 'suspended') actx.resume();
     if (this._pendingBGM) { this._pendingBGM = false; this.startBGM(); }
   },
 
@@ -3378,8 +3402,9 @@ let aimLockSpecies = null;        // species of locked target
 let aimLockTarget = null;         // the specific locked fish object
 
 // Shared
-let showSpeciesMenu = false;      // show species picker overlay
-let speciesMenuMode = null;       // 'auto' or 'aim'
+let showSpeciesMenu = false;
+let speciesMenuMode = null;
+let showSidePanel = false;  // mobile vertical panel for ?, BGM, SFX
 
 
 
@@ -5549,138 +5574,194 @@ function drawButton(ctx, x, y, w, h, label, onClick, active) {
 
 function drawHUD(ctx) {
   const barY = GH - HUD_H;
-  ctx.fillStyle = "rgba(0,0,20,0.85)"; ctx.fillRect(0, barY, GW, HUD_H);
-  ctx.fillStyle = "rgba(0,150,200,0.5)"; ctx.fillRect(0, barY, GW, Math.max(2, Math.round(2*_hudScale)));
+  ctx.fillStyle = "rgba(0,0,20,0.88)"; ctx.fillRect(0, barY, GW, HUD_H);
+  ctx.fillStyle = "rgba(0,150,200,0.5)"; ctx.fillRect(0, barY, GW, Math.max(2,Math.round(2*_hudScale)));
 
-  const midY  = barY + HUD_H/2;  // vertical center of HUD
+  const midY = barY + HUD_H/2;
 
-  // ── LEFT: Coin balance ────────────────────────────────────────────────────
-  ctx.fillStyle = "#FFD700";
-  ctx.font = `bold ${HUD_FONT_LG}px Arial`;
-  ctx.textAlign = "left";
-  ctx.fillText("🪙 " + coins.toFixed(2), 24*_hudScale, midY + HUD_FONT_LG*0.35);
-
-  // ── LEFT-CENTER: Bet controls ──────────────────────────────────────────────
-  const betX = Math.round(260 * _hudScale);
-  const betBtnW = BTN_SM, betBtnH = BTN_H;
-  const betValW = Math.round(100 * _hudScale);
-  drawButton(ctx, betX, barY+BTN_PAD, betBtnW, betBtnH, "−",
-    () => { bet = Math.max(BET_MIN, +(bet-0.10).toFixed(2)); AudioMgr.play("sfx_bet_change",{vol:0.4}); });
-  ctx.fillStyle = "#FFF";
-  ctx.font = `bold ${Math.round(24*_hudScale)}px Arial`;
-  ctx.textAlign = "center";
-  ctx.fillText(bet.toFixed(2), betX + betBtnW + betValW/2, midY + Math.round(9*_hudScale));
-  drawButton(ctx, betX + betBtnW + betValW, barY+BTN_PAD, betBtnW, betBtnH, "+",
-    () => { bet = Math.min(BET_MAX, +(bet+0.10).toFixed(2)); AudioMgr.play("sfx_bet_change",{vol:0.4}); });
-
-  // ── RIGHT: All action buttons ──────────────────────────────────────────────
-  // Layout right-to-left: SFX | BGM | ? | AIM | AUTO | WEAPON
-  // Use fixed right edge with BTN_GAP spacing
-  let rx = GW - Math.round(20*_hudScale); // current right edge
-
-  // SFX toggle
-  const sfxLabel = AudioMgr._sfxOff ? "🔇" : "🔊";
-  rx -= BTN_SM;
-  drawButton(ctx, rx, barY+BTN_PAD, BTN_SM, BTN_H, sfxLabel, () => {
-    AudioMgr.toggleSFX();
-  }, AudioMgr._sfxOff);
-  ctx.fillStyle = "#888"; ctx.font = `${HUD_FONT_SM}px Arial`; ctx.textAlign = "center";
-  ctx.fillText("SFX", rx+BTN_SM/2, barY+HUD_H - Math.round(6*_hudScale));
-
-  rx -= BTN_GAP;
-
-  // BGM toggle
-  const bgmLabel = AudioMgr._bgmOff ? "🎵" : "🎶";
-  rx -= BTN_SM;
-  drawButton(ctx, rx, barY+BTN_PAD, BTN_SM, BTN_H, bgmLabel, () => {
-    AudioMgr.toggleBGM();
-  }, AudioMgr._bgmOff);
-  ctx.fillStyle = "#888"; ctx.font = `${HUD_FONT_SM}px Arial`; ctx.textAlign = "center";
-  ctx.fillText("BGM", rx+BTN_SM/2, barY+HUD_H - Math.round(6*_hudScale));
-
-  rx -= BTN_GAP;
-
-  // Help button
-  rx -= BTN_SM;
-  drawButton(ctx, rx, barY+BTN_PAD, BTN_SM, BTN_H, "?",
-    () => { helpMenuOpen = !helpMenuOpen; AudioMgr.play("sfx_button",{vol:0.4}); });
-
-  rx -= BTN_GAP;
-
-  // AIM button
-  let aimLabel;
-  if (aimPickMode) aimLabel = "Pick…";
-  else if (aimLockActive && aimLockSpecies) aimLabel = SPECIES[aimLockSpecies]?.name.slice(0,5) || "Aim";
-  else aimLabel = "Aim";
-  rx -= BTN_MD;
-  drawButton(ctx, rx, barY+BTN_PAD, BTN_MD, BTN_H, aimLabel, () => {
-    if (aimPickMode) { aimPickMode = false; }
-    else if (aimLockActive) { aimLockActive = false; aimLockSpecies = null; aimLockTarget = null; }
-    else { aimPickMode = true; }
-    if (window._updateCursor) window._updateCursor();
-  }, aimLockActive || aimPickMode);
-  if (aimLockSpecies) {
-    const aimHintTxt = aimLockTarget ? (SPECIES[aimLockSpecies]?.name || "").slice(0,6) : "…";
-    ctx.fillStyle = aimLockTarget ? "#FF9977" : "#884433";
-    ctx.font = `${HUD_FONT_SM}px Arial`; ctx.textAlign = "center";
-    ctx.fillText(aimHintTxt, rx+BTN_MD/2, barY+HUD_H - Math.round(6*_hudScale));
+  if (_mob) {
+    drawHUD_mobile(ctx, barY, midY);
+  } else {
+    drawHUD_desktop(ctx, barY, midY);
   }
 
-  rx -= BTN_GAP;
-
-  // AUTO button
-  const autoActive = autoFireSpeciesList.size > 0;
-  const autoLabel = autoActive ? `Auto(${autoFireSpeciesList.size})` : "Auto";
-  rx -= BTN_MD;
-  drawButton(ctx, rx, barY+BTN_PAD, BTN_MD, BTN_H, autoLabel, () => {
-    if (!autoActive) { speciesMenuMode = 'auto'; showSpeciesMenu = true; }
-    else { autoFireSpeciesList.clear(); autoFireTarget = null; showSpeciesMenu = false; }
-    if (window._updateCursor) window._updateCursor();
-  }, autoActive);
-  if (autoActive) {
-    let heaviestName = "", heaviestMult = -1;
-    autoFireSpeciesList.forEach(id => {
-      if (SPECIES[id] && SPECIES[id].mult > heaviestMult) {
-        heaviestMult = SPECIES[id].mult; heaviestName = SPECIES[id].name.slice(0, 6);
-      }
-    });
-    ctx.fillStyle = "#FFAA44"; ctx.font = `${HUD_FONT_SM}px Arial`; ctx.textAlign = "center";
-    ctx.fillText("↑"+heaviestName, rx+BTN_MD/2, barY+HUD_H - Math.round(6*_hudScale));
-  }
-
-  rx -= BTN_GAP;
-
-  // Weapon button
-  const wepNames = { bullet:"🔫", net:"🕸️", laser:"⚡" };
-  rx -= BTN_LG;
-  drawButton(ctx, rx, barY+BTN_PAD, BTN_LG, BTN_H, wepNames[currentWeapon], () => {
-    const idx = weaponOrder.indexOf(currentWeapon);
-    currentWeapon = weaponOrder[(idx+1)%weaponOrder.length];
-  });
-  ctx.fillStyle = "#AAA"; ctx.font = `${HUD_FONT_SM}px Arial`; ctx.textAlign = "center";
-  ctx.fillText(WEAPONS[currentWeapon].name, rx+BTN_LG/2, barY+HUD_H - Math.round(6*_hudScale));
-
-  // ── Top bar ────────────────────────────────────────────────────────────────
+  // Top bar (both)
   ctx.fillStyle = "rgba(0,0,0,0.5)";
   roundRect(ctx, GW/2-160, 4, 320, 32, 8); ctx.fill();
   ctx.fillStyle = "#FFD700"; ctx.font = "bold 17px Arial"; ctx.textAlign = "center";
   ctx.fillText(`Regal Hall  ${BET_MIN.toFixed(2)} – ${BET_MAX.toFixed(2)}`, GW/2, 26);
 
-  // ── Creature indicators top-right ──────────────────────────────────────────
   if (!_isMobilePerfMode) {
     let indicX = GW - 20;
-    const hasRay = fishes.some(f => f.isRay && f.alive);
+    const hasRay  = fishes.some(f => f.isRay && f.alive);
     const hasCroc = fishes.some(f => f.isImmortal && f.alive);
     if (hasCroc) {
-      ctx.fillStyle = "#88FF44"; ctx.font = "bold 15px Arial"; ctx.textAlign = "right";
+      ctx.fillStyle="#88FF44"; ctx.font="bold 15px Arial"; ctx.textAlign="right";
       ctx.fillText("☠ IMMORTAL CROC", indicX, 22); indicX -= 200;
     }
     if (hasRay) {
-      ctx.fillStyle = "#88EEFF"; ctx.font = "bold 15px Arial"; ctx.textAlign = "right";
+      ctx.fillStyle="#88EEFF"; ctx.font="bold 15px Arial"; ctx.textAlign="right";
       ctx.fillText("⚡ ELECTRIC RAY", indicX, 22);
     }
   }
 }
+
+function drawHUD_desktop(ctx, barY, midY) {
+  // Balance
+  ctx.fillStyle="#FFD700"; ctx.font="bold 28px Arial"; ctx.textAlign="left";
+  ctx.fillText("🪙 "+coins.toFixed(2), 30, midY+10);
+
+  // Bet
+  const betX=280;
+  drawButton(ctx,betX,barY+13,48,48,"−",()=>{bet=Math.max(BET_MIN,+(bet-0.10).toFixed(2));AudioMgr.play("sfx_bet_change",{vol:0.4});});
+  ctx.fillStyle="#FFF"; ctx.font="bold 26px Arial"; ctx.textAlign="center";
+  ctx.fillText(bet.toFixed(2),betX+78,midY+9);
+  drawButton(ctx,betX+108,barY+13,48,48,"+",()=>{bet=Math.min(BET_MAX,+(bet+0.10).toFixed(2));AudioMgr.play("sfx_bet_change",{vol:0.4});});
+
+  // Right-side buttons
+  let rx = GW-20;
+  // SFX
+  rx-=48; drawButton(ctx,rx,barY+13,48,48,AudioMgr._sfxOff?"🔇":"🔊",()=>AudioMgr.toggleSFX(),AudioMgr._sfxOff);
+  ctx.fillStyle="#888"; ctx.font="13px Arial"; ctx.textAlign="center"; ctx.fillText("SFX",rx+24,barY+HUD_H-4);
+  rx-=12;
+  // BGM
+  rx-=48; drawButton(ctx,rx,barY+13,48,48,AudioMgr._bgmOff?"🎵":"🎶",()=>AudioMgr.toggleBGM(),AudioMgr._bgmOff);
+  ctx.fillStyle="#888"; ctx.font="13px Arial"; ctx.textAlign="center"; ctx.fillText("BGM",rx+24,barY+HUD_H-4);
+  rx-=12;
+  // Help
+  rx-=48; drawButton(ctx,rx,barY+13,48,48,"?",()=>{helpMenuOpen=!helpMenuOpen;AudioMgr.play("sfx_button",{vol:0.4});});
+  rx-=12;
+  // Aim
+  let aimLbl=aimPickMode?"Pick…":aimLockActive&&aimLockSpecies?(SPECIES[aimLockSpecies]?.name.slice(0,5)||"Aim"):"Aim";
+  rx-=68; drawButton(ctx,rx,barY+13,68,48,aimLbl,()=>{
+    if(aimPickMode){aimPickMode=false;}
+    else if(aimLockActive){aimLockActive=false;aimLockSpecies=null;aimLockTarget=null;}
+    else{aimPickMode=true;}
+    if(window._updateCursor)window._updateCursor();
+  },aimLockActive||aimPickMode);
+  if(aimLockSpecies){ctx.fillStyle=aimLockTarget?"#FF9977":"#884433";ctx.font="12px Arial";ctx.textAlign="center";
+    ctx.fillText(aimLockTarget?(SPECIES[aimLockSpecies]?.name||"").slice(0,6):"…",rx+34,barY+HUD_H-4);}
+  rx-=12;
+  // Auto
+  const autoActive=autoFireSpeciesList.size>0;
+  const autoLbl=autoActive?`Auto(${autoFireSpeciesList.size})`:"Auto";
+  rx-=68; drawButton(ctx,rx,barY+13,68,48,autoLbl,()=>{
+    if(!autoActive){speciesMenuMode='auto';showSpeciesMenu=true;}
+    else{autoFireSpeciesList.clear();autoFireTarget=null;showSpeciesMenu=false;}
+    if(window._updateCursor)window._updateCursor();
+  },autoActive);
+  if(autoActive){let hn="",hm=-1;autoFireSpeciesList.forEach(id=>{if(SPECIES[id]&&SPECIES[id].mult>hm){hm=SPECIES[id].mult;hn=SPECIES[id].name.slice(0,6);}});
+    ctx.fillStyle="#FFAA44";ctx.font="12px Arial";ctx.textAlign="center";ctx.fillText("↑"+hn,rx+34,barY+HUD_H-4);}
+  rx-=12;
+  // Weapon
+  const wn={bullet:"🔫",net:"🕸️",laser:"⚡"};
+  rx-=55; drawButton(ctx,rx,barY+13,55,48,wn[currentWeapon],()=>{
+    const i=weaponOrder.indexOf(currentWeapon);currentWeapon=weaponOrder[(i+1)%weaponOrder.length];
+  });
+  ctx.fillStyle="#AAA"; ctx.font="13px Arial"; ctx.textAlign="center";
+  ctx.fillText(WEAPONS[currentWeapon].name,rx+27,barY+HUD_H-4);
+}
+
+function drawHUD_mobile(ctx, barY, midY) {
+  // ── Bottom HUD: balance | bet− | amount | bet+ | WEAPON | AUTO | AIM ──────
+  const p = BTN_PAD;
+  const g = BTN_GAP;
+  let x = Math.round(18*_hudScale);
+
+  // Balance (compact)
+  ctx.fillStyle="#FFD700"; ctx.font=`bold ${HUD_FONT_LG}px Arial`; ctx.textAlign="left";
+  ctx.fillText("🪙 "+coins.toFixed(2), x, midY+Math.round(HUD_FONT_LG*0.36));
+  x += Math.round(320*_hudScale);
+
+  // Bet −/amount/+
+  drawButton(ctx,x,barY+p,BTN_SM,BTN_H,"−",()=>{bet=Math.max(BET_MIN,+(bet-0.10).toFixed(2));AudioMgr.play("sfx_bet_change",{vol:0.4});});
+  x += BTN_SM+g;
+  ctx.fillStyle="#FFF"; ctx.font=`bold ${Math.round(22*_hudScale)}px Arial`; ctx.textAlign="center";
+  ctx.fillText(bet.toFixed(2), x+Math.round(55*_hudScale), midY+Math.round(8*_hudScale));
+  x += Math.round(110*_hudScale)+g;
+  drawButton(ctx,x,barY+p,BTN_SM,BTN_H,"+",()=>{bet=Math.min(BET_MAX,+(bet+0.10).toFixed(2));AudioMgr.play("sfx_bet_change",{vol:0.4});});
+  x += BTN_SM+g*2;
+
+  // Weapon button (bullet only on mobile)
+  drawButton(ctx,x,barY+p,BTN_LG,BTN_H,"🔫",()=>{});  // locked to bullet
+  ctx.fillStyle="#888"; ctx.font=`${HUD_FONT_SM}px Arial`; ctx.textAlign="center";
+  ctx.fillText("Bullet",x+BTN_LG/2,barY+HUD_H-Math.round(6*_hudScale));
+  x += BTN_LG+g;
+
+  // AUTO
+  const autoActive=autoFireSpeciesList.size>0;
+  const autoLbl=autoActive?`Auto(${autoFireSpeciesList.size})`:"Auto";
+  drawButton(ctx,x,barY+p,BTN_MD,BTN_H,autoLbl,()=>{
+    if(!autoActive){speciesMenuMode='auto';showSpeciesMenu=true;}
+    else{autoFireSpeciesList.clear();autoFireTarget=null;showSpeciesMenu=false;}
+    if(window._updateCursor)window._updateCursor();
+  },autoActive);
+  if(autoActive){let hn="",hm=-1;autoFireSpeciesList.forEach(id=>{if(SPECIES[id]&&SPECIES[id].mult>hm){hm=SPECIES[id].mult;hn=SPECIES[id].name.slice(0,5);}});
+    ctx.fillStyle="#FFAA44";ctx.font=`${HUD_FONT_SM}px Arial`;ctx.textAlign="center";ctx.fillText("↑"+hn,x+BTN_MD/2,barY+HUD_H-Math.round(6*_hudScale));}
+  x += BTN_MD+g;
+
+  // AIM
+  let aimLbl=aimPickMode?"Pick…":aimLockActive&&aimLockSpecies?(SPECIES[aimLockSpecies]?.name.slice(0,4)||"Aim"):"Aim";
+  drawButton(ctx,x,barY+p,BTN_MD,BTN_H,aimLbl,()=>{
+    if(aimPickMode){aimPickMode=false;}
+    else if(aimLockActive){aimLockActive=false;aimLockSpecies=null;aimLockTarget=null;}
+    else{aimPickMode=true;}
+    if(window._updateCursor)window._updateCursor();
+  },aimLockActive||aimPickMode);
+
+  // ── Side panel toggle button (top-right corner) ───────────────────────────
+  const spBtnW = Math.round(80*_hudScale);
+  const spBtnH = Math.round(80*_hudScale);
+  const spBtnX = GW - spBtnW - Math.round(10*_hudScale);
+  const spBtnY = GH - HUD_H - spBtnH - Math.round(10*_hudScale);
+  drawButton(ctx, spBtnX, spBtnY, spBtnW, spBtnH, "☰",
+    () => { showSidePanel = !showSidePanel; });
+
+  // ── Side panel: vertical stack of ?, BGM, SFX ─────────────────────────────
+  if (showSidePanel) {
+    const panW = Math.round(130*_hudScale);
+    const panBtnH = Math.round(90*_hudScale);
+    const panBtnW = Math.round(110*_hudScale);
+    const panGap  = Math.round(14*_hudScale);
+    const panX = GW - panW - Math.round(10*_hudScale);
+    // Panel background
+    const panItems = 4; // ?, BGM, SFX, close
+    const panH = panItems*(panBtnH+panGap)+panGap;
+    const panY = GH - HUD_H - panH - Math.round(10*_hudScale);
+    ctx.fillStyle="rgba(0,5,25,0.92)"; ctx.strokeStyle="rgba(0,150,200,0.6)"; ctx.lineWidth=2;
+    roundRect(ctx,panX-Math.round(10*_hudScale),panY-Math.round(10*_hudScale),
+              panW+Math.round(20*_hudScale),panH+Math.round(20*_hudScale),Math.round(14*_hudScale));
+    ctx.fill(); ctx.stroke();
+
+    let py = panY;
+    const bx = panX + (panW-panBtnW)/2;
+
+    // Help
+    drawButton(ctx,bx,py,panBtnW,panBtnH,"?",
+      ()=>{helpMenuOpen=!helpMenuOpen;showSidePanel=false;AudioMgr.play("sfx_button",{vol:0.4});});
+    ctx.fillStyle="#AAA";ctx.font=`${Math.round(28*_hudScale)}px Arial`;ctx.textAlign="center";
+    ctx.fillText("Help",bx+panBtnW/2,py+panBtnH+Math.round(20*_hudScale));
+    py += panBtnH+panGap;
+
+    // BGM
+    drawButton(ctx,bx,py,panBtnW,panBtnH,AudioMgr._bgmOff?"🎵":"🎶",
+      ()=>AudioMgr.toggleBGM(),AudioMgr._bgmOff);
+    ctx.fillStyle="#AAA";ctx.font=`${Math.round(28*_hudScale)}px Arial`;ctx.textAlign="center";
+    ctx.fillText(AudioMgr._bgmOff?"BGM Off":"BGM On",bx+panBtnW/2,py+panBtnH+Math.round(20*_hudScale));
+    py += panBtnH+panGap;
+
+    // SFX
+    drawButton(ctx,bx,py,panBtnW,panBtnH,AudioMgr._sfxOff?"🔇":"🔊",
+      ()=>AudioMgr.toggleSFX(),AudioMgr._sfxOff);
+    ctx.fillStyle="#AAA";ctx.font=`${Math.round(28*_hudScale)}px Arial`;ctx.textAlign="center";
+    ctx.fillText(AudioMgr._sfxOff?"SFX Off":"SFX On",bx+panBtnW/2,py+panBtnH+Math.round(20*_hudScale));
+    py += panBtnH+panGap;
+
+    // Close panel
+    drawButton(ctx,bx,py,panBtnW,panBtnH,"✕",()=>{showSidePanel=false;});
+  }
+}
+
 
 function drawPrizeWheel(ctx) {
   ctx.save();
