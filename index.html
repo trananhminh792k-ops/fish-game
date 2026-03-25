@@ -4927,6 +4927,11 @@ function drawOverlay() {
   ctx.translate(ox, oy);
   ctx.scale(s, s);
 
+  // Clip everything to the game area — prevents sprites/text bleeding outside
+  ctx.beginPath();
+  ctx.rect(0, 0, GW, GH);
+  ctx.clip();
+
   // Screen shake
   const shakeEffect = effects.find(e => e.type === "screen_shake");
   if (shakeEffect) {
@@ -5081,10 +5086,12 @@ function drawEffects(ctx) {
     } else if (e.type === "reward_text") {
       ctx.save(); ctx.globalAlpha = alpha;
       const rise = (1-e.life/e.maxLife)*70;
+      const _ry = Math.max(40, e.y - rise);
+      const _rx = Math.min(Math.max(100, e.x), GW-100);
       ctx.fillStyle = "#FFD700"; ctx.textAlign = "center";
       ctx.font = "bold 36px Arial";
-      if (!_isMobilePerfMode) { ctx.strokeStyle = "#000"; ctx.lineWidth = 3; ctx.strokeText(e.text, e.x, e.y-rise); }
-      ctx.fillText(e.text, e.x, e.y-rise);
+      if (!_isMobilePerfMode) { ctx.strokeStyle = "#000"; ctx.lineWidth = 3; ctx.strokeText(e.text, _rx, _ry); }
+      ctx.fillText(e.text, _rx, _ry);
       ctx.restore();
     } else if (e.type === "laser_beam") {
       ctx.save(); ctx.globalAlpha = alpha;
@@ -5280,7 +5287,8 @@ function drawEffects(ctx) {
     ctx.font = "bold 18px Arial"; ctx.textAlign = "center";
     if (!_isMobilePerfMode) { ctx.strokeStyle="#003300"; ctx.lineWidth=3; ctx.shadowColor="#00FF44"; ctx.shadowBlur=10; ctx.strokeText("☠ IMMORTAL", pos.x, pos.y - fish.crocH*0.55 - 10); }
     ctx.shadowBlur = 0;
-    ctx.fillText("☠ IMMORTAL", pos.x, pos.y - fish.crocH*0.55 - 10);
+    const _iLabelY = Math.max(30, pos.y - fish.crocH*0.55 - 10);
+    ctx.fillText("☠ IMMORTAL", Math.min(Math.max(150, pos.x), GW-150), _iLabelY);
     ctx.restore();
   });
 
@@ -5719,46 +5727,39 @@ function drawHUD_mobile(ctx, barY, midY) {
 
   // ── Side panel: vertical stack of ?, BGM, SFX ─────────────────────────────
   if (showSidePanel) {
-    const panW = Math.round(130*_hudScale);
-    const panBtnH = Math.round(90*_hudScale);
-    const panBtnW = Math.round(110*_hudScale);
-    const panGap  = Math.round(14*_hudScale);
+    // Icons only — no text labels, clamped inside game area
+    const btnW = Math.round(120*_hudScale);
+    const btnH = Math.round(110*_hudScale);
+    const gap  = Math.round(10*_hudScale);
+    const pad  = Math.round(12*_hudScale);
+    const panItems = 4;
+    const panW = btnW + pad*2;
+    const panH = panItems*btnH + (panItems-1)*gap + pad*2;
     const panX = GW - panW - Math.round(10*_hudScale);
-    // Panel background
-    const panItems = 4; // ?, BGM, SFX, close
-    const panH = panItems*(panBtnH+panGap)+panGap;
-    const panY = GH - HUD_H - panH - Math.round(10*_hudScale);
-    ctx.fillStyle="rgba(0,5,25,0.92)"; ctx.strokeStyle="rgba(0,150,200,0.6)"; ctx.lineWidth=2;
-    roundRect(ctx,panX-Math.round(10*_hudScale),panY-Math.round(10*_hudScale),
-              panW+Math.round(20*_hudScale),panH+Math.round(20*_hudScale),Math.round(14*_hudScale));
+    const panY = Math.max(40, GH - HUD_H - panH - Math.round(15*_hudScale));
+
+    ctx.fillStyle="rgba(0,5,25,0.94)";
+    ctx.strokeStyle="rgba(0,180,220,0.7)";
+    ctx.lineWidth = Math.round(2*_hudScale);
+    roundRect(ctx, panX, panY, panW, panH, Math.round(16*_hudScale));
     ctx.fill(); ctx.stroke();
 
-    let py = panY;
-    const bx = panX + (panW-panBtnW)/2;
+    let py = panY + pad;
+    const bx = panX + pad;
 
-    // Help
-    drawButton(ctx,bx,py,panBtnW,panBtnH,"?",
-      ()=>{helpMenuOpen=!helpMenuOpen;showSidePanel=false;AudioMgr.play("sfx_button",{vol:0.4});});
-    ctx.fillStyle="#AAA";ctx.font=`${Math.round(28*_hudScale)}px Arial`;ctx.textAlign="center";
-    ctx.fillText("Help",bx+panBtnW/2,py+panBtnH+Math.round(20*_hudScale));
-    py += panBtnH+panGap;
+    drawButton(ctx, bx, py, btnW, btnH, "❓",
+      ()=>{helpMenuOpen=!helpMenuOpen; showSidePanel=false; AudioMgr.play("sfx_button",{vol:0.4});});
+    py += btnH + gap;
 
-    // BGM
-    drawButton(ctx,bx,py,panBtnW,panBtnH,AudioMgr._bgmOff?"🎵":"🎶",
-      ()=>AudioMgr.toggleBGM(),AudioMgr._bgmOff);
-    ctx.fillStyle="#AAA";ctx.font=`${Math.round(28*_hudScale)}px Arial`;ctx.textAlign="center";
-    ctx.fillText(AudioMgr._bgmOff?"BGM Off":"BGM On",bx+panBtnW/2,py+panBtnH+Math.round(20*_hudScale));
-    py += panBtnH+panGap;
+    drawButton(ctx, bx, py, btnW, btnH, AudioMgr._bgmOff ? "🔕" : "🎶",
+      ()=>AudioMgr.toggleBGM(), AudioMgr._bgmOff);
+    py += btnH + gap;
 
-    // SFX
-    drawButton(ctx,bx,py,panBtnW,panBtnH,AudioMgr._sfxOff?"🔇":"🔊",
-      ()=>AudioMgr.toggleSFX(),AudioMgr._sfxOff);
-    ctx.fillStyle="#AAA";ctx.font=`${Math.round(28*_hudScale)}px Arial`;ctx.textAlign="center";
-    ctx.fillText(AudioMgr._sfxOff?"SFX Off":"SFX On",bx+panBtnW/2,py+panBtnH+Math.round(20*_hudScale));
-    py += panBtnH+panGap;
+    drawButton(ctx, bx, py, btnW, btnH, AudioMgr._sfxOff ? "🔇" : "🔊",
+      ()=>AudioMgr.toggleSFX(), AudioMgr._sfxOff);
+    py += btnH + gap;
 
-    // Close panel
-    drawButton(ctx,bx,py,panBtnW,panBtnH,"✕",()=>{showSidePanel=false;});
+    drawButton(ctx, bx, py, btnW, btnH, "✕", ()=>{showSidePanel=false;});
   }
 }
 
