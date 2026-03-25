@@ -3016,10 +3016,12 @@ const SOUND_FILES = {
 
 const AudioMgr = {
   _vol: 1.0,
-  _muted: false,
+  _muted: false,     // legacy: mutes everything
+  _bgmOff: false,    // BGM specifically disabled
+  _sfxOff: false,    // SFX specifically disabled
   _bgmNode: null,
-  _started: false,          // becomes true after first user gesture
-  _pendingBGM: false,       // BGM was requested before gesture
+  _started: false,
+  _pendingBGM: false,
   sounds: {},               // populated by loadSounds()
 
   // Load all audio files. Call once at startup.
@@ -3035,15 +3037,16 @@ const AudioMgr = {
   },
 
   // Play a sound by name. Returns the playing Audio node (or null).
-  _lastPlay: {},   // throttle rapid-fire sounds on mobile
+  _lastPlay: {},
   play(name, opts = {}) {
-    if (this._muted || !this._started) return null;
+    // Completely skip if SFX disabled — zero CPU cost
+    if (this._muted || this._sfxOff || !this._started) return null;
     const snd = this.sounds[name];
     if (!snd) return null;
-    // On mobile, throttle bullet/laser sounds — cloneNode is expensive
+    // Throttle rapid bullet sounds on mobile
     if (_mob && (name === 'sfx_bullet_fire' || name === 'sfx_laser_fire' || name === 'sfx_fish_hit')) {
       const now = performance.now();
-      if (now - (this._lastPlay[name] || 0) < 120) return null; // max ~8/sec
+      if (now - (this._lastPlay[name] || 0) < 150) return null;
       this._lastPlay[name] = now;
     }
     try {
@@ -3058,14 +3061,24 @@ const AudioMgr = {
   // Start background music. Safe to call before first user gesture — will
   // auto-play as soon as the first interaction unlocks the AudioContext.
   startBGM() {
-    if (this._bgmNode) return;           // already running
+    if (this._bgmNode) return;
     if (!this._started) { this._pendingBGM = true; return; }
+    if (this._bgmOff || this._muted) return;  // completely disabled — no node created
     const snd = this.sounds.bgm_underwater;
     if (!snd) return;
     this._bgmNode = snd.cloneNode(true);
     this._bgmNode.loop   = true;
     this._bgmNode.volume = Math.max(0, Math.min(1, 0.35 * this._vol));
     this._bgmNode.play().catch(() => {});
+  },
+  toggleBGM() {
+    this._bgmOff = !this._bgmOff;
+    if (this._bgmOff) { this.stopBGM(); }
+    else              { this.startBGM(); }
+  },
+  toggleSFX() {
+    this._sfxOff = !this._sfxOff;
+    // Nothing extra needed — play() checks _sfxOff on every call
   },
 
   stopBGM() {
@@ -3112,7 +3125,21 @@ function loadExplosionSprites() {
 }
 
 const GW = 1920, GH = 1080;
-const HUD_H = 76;
+// Responsive HUD: scale up on mobile so buttons are finger-friendly
+// At mobile scale ~0.19×, 1 screen px = ~5.1 game px
+// Target: 60px screen buttons → 308 game px; HUD height 200 game px
+const _hudScale = _mob ? 2.6 : 1.0;
+const HUD_H = Math.round(76 * _hudScale);  // 76 desktop, 198 mobile
+// Button dimensions in game coordinates
+const BTN_H   = Math.round(48 * _hudScale);  // 48 → 125
+const BTN_SM  = Math.round(48 * _hudScale);  // small square buttons
+const BTN_MD  = Math.round(68 * _hudScale);  // medium (Auto/Aim)
+const BTN_LG  = Math.round(55 * _hudScale);  // weapon button
+const BTN_GAP = Math.round(12 * _hudScale);  // gap between buttons
+const BTN_PAD = Math.round(13 * _hudScale);  // top padding inside HUD
+const HUD_FONT_LG = Math.round(28 * _hudScale);
+const HUD_FONT_MD = Math.round(20 * _hudScale);
+const HUD_FONT_SM = Math.round(13 * _hudScale);
 const FPS_ANIM = 10;
 
 // Sprite rotation offsets
@@ -4682,23 +4709,27 @@ function update(dt) {
 
   // ── AUTO FIRE: fires at heaviest on-screen fish from selected species list ───
   if (autoFireSpeciesList.size > 0 && !prizeWheelActive && !helpMenuOpen && !showSpeciesMenu) {
-    // Drop target if dead, off-screen, or no longer in selected list
-    if (autoFireTarget) {
-      const tp = pathPos(autoFireTarget.pts, autoFireTarget.t + autoFireTarget.tOffset);
-      const onScreen = tp.x >= 0 && tp.x <= GW && tp.y >= 0 && tp.y <= GH - HUD_H;
-      if (!autoFireTarget.alive || !autoFireSpeciesList.has(autoFireTarget.species) || !onScreen)
-        autoFireTarget = null;
-    }
-    // Find the heaviest (highest mult) on-screen fish from any selected species
-    if (!autoFireTarget) {
-      let best = null, bestMult = -1;
-      fishes.forEach(fish => {
-        if (!fish.alive || !autoFireSpeciesList.has(fish.species)) return;
-        const pos = pathPos(fish.pts, fish.t + fish.tOffset);
-        if (pos.x < 0 || pos.x > GW || pos.y < 0 || pos.y > GH - HUD_H) return;
-        if (fish.mult > bestMult) { bestMult = fish.mult; best = fish; }
-      });
-      autoFireTarget = best;
+    // Immediately drop dead targets
+    if (autoFireTarget && !autoFireTarget.alive) autoFireTarget = null;
+    // Re-evaluate target every 6 frames (100ms) — not every frame
+    if (!window._autoCheckFrame) window._autoCheckFrame = 0;
+    if (++window._autoCheckFrame >= 6) {
+      window._autoCheckFrame = 0;
+      if (autoFireTarget) {
+        const tp = pathPos(autoFireTarget.pts, autoFireTarget.t + autoFireTarget.tOffset);
+        const onScreen = tp.x >= 0 && tp.x <= GW && tp.y >= 0 && tp.y <= GH - HUD_H;
+        if (!autoFireSpeciesList.has(autoFireTarget.species) || !onScreen) autoFireTarget = null;
+      }
+      if (!autoFireTarget) {
+        let best = null, bestMult = -1;
+        fishes.forEach(fish => {
+          if (!fish.alive || !autoFireSpeciesList.has(fish.species)) return;
+          const pos = pathPos(fish.pts, fish.t + fish.tOffset);
+          if (pos.x < 0 || pos.x > GW || pos.y < 0 || pos.y > GH - HUD_H) return;
+          if (fish.mult > bestMult) { bestMult = fish.mult; best = fish; }
+        });
+        autoFireTarget = best;
+      }
     }
     if (autoFireTarget && autoFireTarget.alive) {
       const tp = pathPos(autoFireTarget.pts, autoFireTarget.t + autoFireTarget.tOffset);
@@ -4726,27 +4757,28 @@ function update(dt) {
 
   // ── AIM LOCK: fires locked bullets at specific target — only while visible ──
   if (aimLockActive && !prizeWheelActive && !helpMenuOpen && !showSpeciesMenu) {
-    // Drop target if it died or left screen
-    if (aimLockTarget) {
-      const tp = pathPos(aimLockTarget.pts, aimLockTarget.t + aimLockTarget.tOffset);
-      const onScreen = tp.x >= 0 && tp.x <= GW && tp.y >= 0 && tp.y <= GH - HUD_H;
-      if (!aimLockTarget.alive || !onScreen) {
-        // Target left screen — pause aim lock until it reappears (don't auto-switch)
-        aimLockTarget = null;
+    // Drop target if it died
+    if (aimLockTarget && !aimLockTarget.alive) aimLockTarget = null;
+    // Check on-screen / reacquire every 6 frames (100ms at 60fps) — not every frame
+    if (!window._aimCheckFrame) window._aimCheckFrame = 0;
+    if (++window._aimCheckFrame >= 6) {
+      window._aimCheckFrame = 0;
+      if (aimLockTarget) {
+        const tp = pathPos(aimLockTarget.pts, aimLockTarget.t + aimLockTarget.tOffset);
+        const onScreen = tp.x >= 0 && tp.x <= GW && tp.y >= 0 && tp.y <= GH - HUD_H;
+        if (!onScreen) aimLockTarget = null;
       }
-    }
-    // Try to reacquire SAME fish if it re-enters screen
-    if (!aimLockTarget && aimLockSpecies) {
-      let best = null, bestDist = Infinity;
-      fishes.forEach(fish => {
-        if (!fish.alive || fish.species !== aimLockSpecies) return;
-        const pos = pathPos(fish.pts, fish.t + fish.tOffset);
-        // Only pick up fish that are on screen
-        if (pos.x < 0 || pos.x > GW || pos.y < 0 || pos.y > GH - HUD_H) return;
-        const d = Math.sqrt((pos.x-cx)**2 + (pos.y-cy)**2);
-        if (d < bestDist) { bestDist = d; best = fish; }
-      });
-      aimLockTarget = best;
+      if (!aimLockTarget && aimLockSpecies) {
+        let best = null, bestDist = Infinity;
+        fishes.forEach(fish => {
+          if (!fish.alive || fish.species !== aimLockSpecies) return;
+          const pos = pathPos(fish.pts, fish.t + fish.tOffset);
+          if (pos.x < 0 || pos.x > GW || pos.y < 0 || pos.y > GH - HUD_H) return;
+          const d = Math.sqrt((pos.x-cx)**2 + (pos.y-cy)**2);
+          if (d < bestDist) { bestDist = d; best = fish; }
+        });
+        aimLockTarget = best;
+      }
     }
     // Fire only if target is alive and on screen
     if (aimLockTarget && aimLockTarget.alive) {
@@ -5507,122 +5539,146 @@ function roundRect(ctx, x, y, w, h, r) {
 function drawButton(ctx, x, y, w, h, label, onClick, active) {
   buttons.push({ x, y, w, h, onClick });
   ctx.fillStyle = active ? "rgba(0,200,100,0.4)" : "rgba(255,255,255,0.12)";
-  ctx.strokeStyle = active ? "#0f8" : "rgba(255,255,255,0.25)";
-  ctx.lineWidth = 1.5;
-  roundRect(ctx, x, y, w, h, 8); ctx.fill(); ctx.stroke();
+  ctx.strokeStyle = active ? "#0f8" : "rgba(255,255,255,0.3)";
+  ctx.lineWidth = Math.max(1.5, _hudScale);
+  roundRect(ctx, x, y, w, h, Math.round(8*_hudScale)); ctx.fill(); ctx.stroke();
   ctx.fillStyle = active ? "#0f8" : "#FFF";
-  ctx.font = "bold 20px Arial"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = `bold ${HUD_FONT_MD}px Arial`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
   ctx.fillText(label, x+w/2, y+h/2); ctx.textBaseline = "alphabetic";
 }
 
 function drawHUD(ctx) {
   const barY = GH - HUD_H;
-  ctx.fillStyle = "rgba(0,0,20,0.8)"; ctx.fillRect(0, barY, GW, HUD_H);
-  ctx.fillStyle = "rgba(0,100,150,0.4)"; ctx.fillRect(0, barY, GW, 2);
+  ctx.fillStyle = "rgba(0,0,20,0.85)"; ctx.fillRect(0, barY, GW, HUD_H);
+  ctx.fillStyle = "rgba(0,150,200,0.5)"; ctx.fillRect(0, barY, GW, Math.max(2, Math.round(2*_hudScale)));
 
-  // Coin + balance
-  ctx.fillStyle = "#FFD700"; ctx.font = "bold 28px Arial"; ctx.textAlign = "left";
-  ctx.fillText("🪙 " + coins.toFixed(2), 30, barY+48);
+  const midY  = barY + HUD_H/2;  // vertical center of HUD
 
-  // Bet
-  const betX = 280;
-  drawButton(ctx, betX, barY+13, 48, 48, "−", () => { bet = Math.max(BET_MIN, +(bet-0.10).toFixed(2)); AudioMgr.play("sfx_bet_change", {vol:0.4}); });
-  ctx.fillStyle = "#FFF"; ctx.font = "bold 26px Arial"; ctx.textAlign = "center";
-  ctx.fillText(bet.toFixed(2), betX+78, barY+46);
-  drawButton(ctx, betX+108, barY+13, 48, 48, "+", () => { bet = Math.min(BET_MAX, +(bet+0.10).toFixed(2)); AudioMgr.play("sfx_bet_change", {vol:0.4}); });
+  // ── LEFT: Coin balance ────────────────────────────────────────────────────
+  ctx.fillStyle = "#FFD700";
+  ctx.font = `bold ${HUD_FONT_LG}px Arial`;
+  ctx.textAlign = "left";
+  ctx.fillText("🪙 " + coins.toFixed(2), 24*_hudScale, midY + HUD_FONT_LG*0.35);
 
-  // Weapons + controls (right side)
-  const rightBase = GW - 380;
-  const wepNames = { bullet:"🔫", net:"🕸️", laser:"⚡" };
-  drawButton(ctx, rightBase, barY+13, 55, 48, wepNames[currentWeapon], () => {
-    const idx = weaponOrder.indexOf(currentWeapon);
-    currentWeapon = weaponOrder[(idx+1)%weaponOrder.length];
-  });
-  ctx.fillStyle = "#AAA"; ctx.font = "13px Arial"; ctx.textAlign = "center";
-  ctx.fillText(WEAPONS[currentWeapon].name, rightBase+27, barY+HUD_H-4);
-  // Show auto/aim status below buttons
-  if (autoFireSpeciesList.size > 0) {
-    ctx.fillStyle = "#FFAA44"; ctx.font = "11px Arial"; ctx.textAlign = "center";
-    // Show the heaviest currently selected species name
-    let heaviestName = ""; let heaviestMult = -1;
-    autoFireSpeciesList.forEach(id => {
-      if (SPECIES[id] && SPECIES[id].mult > heaviestMult) {
-        heaviestMult = SPECIES[id].mult;
-        heaviestName = SPECIES[id].name.slice(0, 6);
-      }
-    });
-    ctx.fillText("↑" + heaviestName, rightBase+70+34, barY+HUD_H-4);
-  }
-  if (aimLockSpecies) {
-    const aimHintTxt = aimLockTarget ? "→ " + (SPECIES[aimLockSpecies]?.name || "") : "waiting…";
-    ctx.fillStyle = aimLockTarget ? "#FF6644" : "#AA4422";
-    ctx.font = "12px Arial"; ctx.textAlign = "center";
-    ctx.fillText(aimHintTxt, rightBase+153+34, barY+HUD_H-4);
-  }
+  // ── LEFT-CENTER: Bet controls ──────────────────────────────────────────────
+  const betX = Math.round(260 * _hudScale);
+  const betBtnW = BTN_SM, betBtnH = BTN_H;
+  const betValW = Math.round(100 * _hudScale);
+  drawButton(ctx, betX, barY+BTN_PAD, betBtnW, betBtnH, "−",
+    () => { bet = Math.max(BET_MIN, +(bet-0.10).toFixed(2)); AudioMgr.play("sfx_bet_change",{vol:0.4}); });
+  ctx.fillStyle = "#FFF";
+  ctx.font = `bold ${Math.round(24*_hudScale)}px Arial`;
+  ctx.textAlign = "center";
+  ctx.fillText(bet.toFixed(2), betX + betBtnW + betValW/2, midY + Math.round(9*_hudScale));
+  drawButton(ctx, betX + betBtnW + betValW, barY+BTN_PAD, betBtnW, betBtnH, "+",
+    () => { bet = Math.min(BET_MAX, +(bet+0.10).toFixed(2)); AudioMgr.play("sfx_bet_change",{vol:0.4}); });
 
-  // AUTO button: multi-select species, always fires heaviest on screen
-  const autoActive = autoFireSpeciesList.size > 0;
-  const autoLabel = autoActive ? `Auto(${autoFireSpeciesList.size})` : "Auto";
-  drawButton(ctx, rightBase+70, barY+13, 68, 48, autoLabel, () => {
-    if (!autoActive) {
-      speciesMenuMode = 'auto';
-      showSpeciesMenu = true;
-    } else {
-      autoFireSpeciesList.clear();
-      autoFireTarget = null;
-      showSpeciesMenu = false;
-    }
-    if (window._updateCursor) window._updateCursor();
-  }, autoActive);
+  // ── RIGHT: All action buttons ──────────────────────────────────────────────
+  // Layout right-to-left: SFX | BGM | ? | AIM | AUTO | WEAPON
+  // Use fixed right edge with BTN_GAP spacing
+  let rx = GW - Math.round(20*_hudScale); // current right edge
 
-  // AIM button: click on a live creature to lock onto it
+  // SFX toggle
+  const sfxLabel = AudioMgr._sfxOff ? "🔇" : "🔊";
+  rx -= BTN_SM;
+  drawButton(ctx, rx, barY+BTN_PAD, BTN_SM, BTN_H, sfxLabel, () => {
+    AudioMgr.toggleSFX();
+  }, AudioMgr._sfxOff);
+  ctx.fillStyle = "#888"; ctx.font = `${HUD_FONT_SM}px Arial`; ctx.textAlign = "center";
+  ctx.fillText("SFX", rx+BTN_SM/2, barY+HUD_H - Math.round(6*_hudScale));
+
+  rx -= BTN_GAP;
+
+  // BGM toggle
+  const bgmLabel = AudioMgr._bgmOff ? "🎵" : "🎶";
+  rx -= BTN_SM;
+  drawButton(ctx, rx, barY+BTN_PAD, BTN_SM, BTN_H, bgmLabel, () => {
+    AudioMgr.toggleBGM();
+  }, AudioMgr._bgmOff);
+  ctx.fillStyle = "#888"; ctx.font = `${HUD_FONT_SM}px Arial`; ctx.textAlign = "center";
+  ctx.fillText("BGM", rx+BTN_SM/2, barY+HUD_H - Math.round(6*_hudScale));
+
+  rx -= BTN_GAP;
+
+  // Help button
+  rx -= BTN_SM;
+  drawButton(ctx, rx, barY+BTN_PAD, BTN_SM, BTN_H, "?",
+    () => { helpMenuOpen = !helpMenuOpen; AudioMgr.play("sfx_button",{vol:0.4}); });
+
+  rx -= BTN_GAP;
+
+  // AIM button
   let aimLabel;
   if (aimPickMode) aimLabel = "Pick…";
   else if (aimLockActive && aimLockSpecies) aimLabel = SPECIES[aimLockSpecies]?.name.slice(0,5) || "Aim";
   else aimLabel = "Aim";
-  drawButton(ctx, rightBase+153, barY+13, 68, 48, aimLabel, () => {
-    if (aimPickMode) {
-      // Cancel pick mode
-      aimPickMode = false;
-    } else if (aimLockActive) {
-      // Turn off aim lock
-      aimLockActive = false;
-      aimLockSpecies = null;
-      aimLockTarget = null;
-    } else {
-      // Enter pick mode — next click on a creature locks it
-      aimPickMode = true;
-    }
+  rx -= BTN_MD;
+  drawButton(ctx, rx, barY+BTN_PAD, BTN_MD, BTN_H, aimLabel, () => {
+    if (aimPickMode) { aimPickMode = false; }
+    else if (aimLockActive) { aimLockActive = false; aimLockSpecies = null; aimLockTarget = null; }
+    else { aimPickMode = true; }
     if (window._updateCursor) window._updateCursor();
   }, aimLockActive || aimPickMode);
-  drawButton(ctx, rightBase+236, barY+13, 48, 48, "?", () => { helpMenuOpen = !helpMenuOpen; AudioMgr.play("sfx_button",{vol:0.4}); });
-  const muteLabel = AudioMgr._muted ? "🔇" : "🔊";
-  drawButton(ctx, rightBase+298, barY+13, 48, 48, muteLabel, () => {
-    if (AudioMgr._muted) AudioMgr.unmute(); else AudioMgr.mute();
-  });
-
-  // Top bar
-  ctx.fillStyle = "rgba(0,0,0,0.5)";
-  roundRect(ctx, GW/2-150, 5, 300, 30, 8); ctx.fill();
-  ctx.fillStyle = "#FFD700"; ctx.font = "15px Arial"; ctx.textAlign = "center";
-  ctx.fillText(`Regal Hall  ${BET_MIN.toFixed(2)} – ${BET_MAX.toFixed(2)}`, GW/2, 25);
-
-  // Show active special creatures in top-right
-  let indicX = GW - 20;
-  const hasRay = fishes.some(f => f.isRay && f.alive);
-  const hasCroc = fishes.some(f => f.isImmortal && f.alive);
-  if (hasCroc) {
-    ctx.fillStyle = "#88FF44"; ctx.font = "bold 15px Arial"; ctx.textAlign = "right";
-    ctx.shadowColor = "#00FF44"; ctx.shadowBlur = 8;
-    ctx.fillText("☠ IMMORTAL CROC", indicX, 22);
-    ctx.shadowBlur = 0;
-    indicX -= 200;
+  if (aimLockSpecies) {
+    const aimHintTxt = aimLockTarget ? (SPECIES[aimLockSpecies]?.name || "").slice(0,6) : "…";
+    ctx.fillStyle = aimLockTarget ? "#FF9977" : "#884433";
+    ctx.font = `${HUD_FONT_SM}px Arial`; ctx.textAlign = "center";
+    ctx.fillText(aimHintTxt, rx+BTN_MD/2, barY+HUD_H - Math.round(6*_hudScale));
   }
-  if (hasRay) {
-    ctx.fillStyle = "#88EEFF"; ctx.font = "bold 15px Arial"; ctx.textAlign = "right";
-    ctx.shadowColor = "#00AAFF"; ctx.shadowBlur = 8;
-    ctx.fillText("⚡ ELECTRIC RAY", indicX, 22);
-    ctx.shadowBlur = 0;
+
+  rx -= BTN_GAP;
+
+  // AUTO button
+  const autoActive = autoFireSpeciesList.size > 0;
+  const autoLabel = autoActive ? `Auto(${autoFireSpeciesList.size})` : "Auto";
+  rx -= BTN_MD;
+  drawButton(ctx, rx, barY+BTN_PAD, BTN_MD, BTN_H, autoLabel, () => {
+    if (!autoActive) { speciesMenuMode = 'auto'; showSpeciesMenu = true; }
+    else { autoFireSpeciesList.clear(); autoFireTarget = null; showSpeciesMenu = false; }
+    if (window._updateCursor) window._updateCursor();
+  }, autoActive);
+  if (autoActive) {
+    let heaviestName = "", heaviestMult = -1;
+    autoFireSpeciesList.forEach(id => {
+      if (SPECIES[id] && SPECIES[id].mult > heaviestMult) {
+        heaviestMult = SPECIES[id].mult; heaviestName = SPECIES[id].name.slice(0, 6);
+      }
+    });
+    ctx.fillStyle = "#FFAA44"; ctx.font = `${HUD_FONT_SM}px Arial`; ctx.textAlign = "center";
+    ctx.fillText("↑"+heaviestName, rx+BTN_MD/2, barY+HUD_H - Math.round(6*_hudScale));
+  }
+
+  rx -= BTN_GAP;
+
+  // Weapon button
+  const wepNames = { bullet:"🔫", net:"🕸️", laser:"⚡" };
+  rx -= BTN_LG;
+  drawButton(ctx, rx, barY+BTN_PAD, BTN_LG, BTN_H, wepNames[currentWeapon], () => {
+    const idx = weaponOrder.indexOf(currentWeapon);
+    currentWeapon = weaponOrder[(idx+1)%weaponOrder.length];
+  });
+  ctx.fillStyle = "#AAA"; ctx.font = `${HUD_FONT_SM}px Arial`; ctx.textAlign = "center";
+  ctx.fillText(WEAPONS[currentWeapon].name, rx+BTN_LG/2, barY+HUD_H - Math.round(6*_hudScale));
+
+  // ── Top bar ────────────────────────────────────────────────────────────────
+  ctx.fillStyle = "rgba(0,0,0,0.5)";
+  roundRect(ctx, GW/2-160, 4, 320, 32, 8); ctx.fill();
+  ctx.fillStyle = "#FFD700"; ctx.font = "bold 17px Arial"; ctx.textAlign = "center";
+  ctx.fillText(`Regal Hall  ${BET_MIN.toFixed(2)} – ${BET_MAX.toFixed(2)}`, GW/2, 26);
+
+  // ── Creature indicators top-right ──────────────────────────────────────────
+  if (!_isMobilePerfMode) {
+    let indicX = GW - 20;
+    const hasRay = fishes.some(f => f.isRay && f.alive);
+    const hasCroc = fishes.some(f => f.isImmortal && f.alive);
+    if (hasCroc) {
+      ctx.fillStyle = "#88FF44"; ctx.font = "bold 15px Arial"; ctx.textAlign = "right";
+      ctx.fillText("☠ IMMORTAL CROC", indicX, 22); indicX -= 200;
+    }
+    if (hasRay) {
+      ctx.fillStyle = "#88EEFF"; ctx.font = "bold 15px Arial"; ctx.textAlign = "right";
+      ctx.fillText("⚡ ELECTRIC RAY", indicX, 22);
+    }
   }
 }
 
