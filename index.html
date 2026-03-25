@@ -3125,6 +3125,10 @@ function loadExplosionSprites() {
 }
 
 const GW = 1920, GH = 1080;
+// Detect mobile device (used throughout for performance + layout)
+const _mob = ('ontouchstart' in window) || window.innerWidth < 900;
+const _isMobilePerfMode = _mob; // alias used in draw functions
+
 // Responsive HUD: scale up on mobile so buttons are finger-friendly
 // At mobile scale ~0.19×, 1 screen px = ~5.1 game px
 // Target: 60px screen buttons → 308 game px; HUD height 200 game px
@@ -3329,7 +3333,6 @@ const weaponOrder = ["bullet","net","laser"];
 let autoFire = false, autoAim = false, firing = false;
 let lastFireTime = 0;
 // On mobile, increase cooldowns to reduce simultaneous draw calls
-const _mob = ('ontouchstart' in window) || window.innerWidth < 900;
 const FIRE_COOLDOWNS = {
   bullet: _mob ? 280 : 200,
   net:    _mob ? 700 : 600,
@@ -5014,9 +5017,6 @@ function updateBossWavesPixi() {
     g.fill({ color: 0x96E6FF, alpha: 0.08 });
   });
 }
-
-// Detect mobile once for performance branches
-const _isMobilePerfMode = ('ontouchstart' in window) || window.innerWidth < 900;
 
 function drawEffects(ctx) {
   effects.forEach(e => {
