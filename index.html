@@ -3033,6 +3033,7 @@ const AudioMgr = {
       if (BGM_KEYS.has(name)) {
         const a = new Audio();
         a.preload = "auto";
+        a.crossOrigin = "anonymous";
         a.addEventListener("error", () => {}, { once: true });
         a.src = path;
         this._htmlSounds[name] = a;
@@ -3083,22 +3084,39 @@ const AudioMgr = {
   },
 
   startBGM() {
-    if (this._bgmNode) return;
+    if (this._bgmNode && !this._bgmNode.paused) return; // already playing
     if (!this._started) { this._pendingBGM = true; return; }
     if (this._bgmOff || this._muted) return;
     const snd = this._htmlSounds.bgm_underwater;
     if (!snd) return;
-    this._bgmNode = snd;
-    this._bgmNode.loop = true;
-    this._bgmNode.volume = Math.max(0, Math.min(1, 0.35 * this._vol));
-    this._bgmNode.play().catch(() => {});
+    // Always use the original element (reliable loop support)
+    snd.loop = true;
+    snd.volume = Math.max(0, Math.min(1, 0.35 * this._vol));
+    // Ensure src is set and element is ready
+    if (!snd.src || snd.readyState === 0) {
+      snd.load(); // force load if not started
+    }
+    const playPromise = snd.play();
+    if (playPromise !== undefined) {
+      playPromise
+        .then(() => { this._bgmNode = snd; })
+        .catch(() => {
+          // Play was blocked — mark as pending so next gesture retries
+          this._bgmNode = null;
+          this._pendingBGM = true;
+          this._started = false; // reset so next gesture triggers again
+        });
+    } else {
+      this._bgmNode = snd;
+    }
   },
 
   stopBGM() {
-    if (this._bgmNode) {
-      try { this._bgmNode.pause(); this._bgmNode.currentTime = 0; } catch(e) {}
-      this._bgmNode = null;
+    const snd = this._htmlSounds.bgm_underwater;
+    if (snd) {
+      try { snd.pause(); snd.currentTime = 0; } catch(e) {}
     }
+    this._bgmNode = null;
   },
 
   toggleBGM() {
@@ -3109,11 +3127,21 @@ const AudioMgr = {
   toggleSFX() { this._sfxOff = !this._sfxOff; },
 
   unlockAndStart() {
-    if (this._started) return;
-    this._started = true;
+    // Always attempt to resume Web Audio context on every gesture
     const actx = this._getActx();
-    if (actx && actx.state === 'suspended') actx.resume();
-    if (this._pendingBGM) { this._pendingBGM = false; this.startBGM(); }
+    if (actx && actx.state === 'suspended') actx.resume().catch(() => {});
+
+    // If not started yet, mark started and kick off BGM
+    if (!this._started) {
+      this._started = true;
+      this._pendingBGM = false;
+      this.startBGM();
+      return;
+    }
+    // If BGM should be playing but isn't (e.g. autoplay was blocked), retry
+    if (!this._bgmOff && !this._muted && (!this._bgmNode || this._bgmNode.paused)) {
+      this.startBGM();
+    }
   },
 
   setVolume(v) {
@@ -5697,15 +5725,11 @@ function drawHUD_mobile(ctx, barY, midY) {
   let rx = GW - Math.round(20*_hudScale);
 
   // Fullscreen ⛶
+  const isFS = !!(document.fullscreenElement || document.webkitFullscreenElement);
   rx -= BTN_SM;
-  drawButton(ctx, rx, barY+p, BTN_SM, BTN_H, "⛶", () => {
-    const el = document.documentElement;
-    if (!document.fullscreenElement) {
-      (el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen).call(el);
-    } else {
-      (document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen).call(document);
-    }
-  });
+  drawButton(ctx, rx, barY+p, BTN_SM, BTN_H, isFS ? "⊡" : "⛶", () => {
+    _toggleFullscreen();
+  }, isFS);
   rx -= g;
 
   // Sound on/off (BGM + SFX together) 🔊/🔇
@@ -6204,6 +6228,36 @@ function handleClick(gx, gy) {
   if (now - lastFireTime > FIRE_COOLDOWNS[currentWeapon]) { shoot(); lastFireTime = now; }
 }
 
+function _toggleFullscreen() {
+  const isFS = !!(document.fullscreenElement || document.webkitFullscreenElement
+                || document.mozFullScreenElement || document.msFullscreenElement);
+  const el = document.documentElement; // always use root element for max compat
+
+  if (!isFS) {
+    const req = el.requestFullscreen || el.webkitRequestFullscreen
+              || el.mozRequestFullScreen || el.msRequestFullscreen;
+    if (req) {
+      Promise.resolve(req.call(el)).catch(() => {});
+    } else {
+      // iOS Safari: no Fullscreen API — fake it by hiding browser chrome
+      window.scrollTo(0, 1);
+      // Try to lock landscape orientation
+      try {
+        const lo = screen.orientation || screen.mozOrientation || screen.msOrientation;
+        if (lo && lo.lock) lo.lock("landscape").catch(() => {});
+      } catch(e) {}
+    }
+  } else {
+    const exit = document.exitFullscreen || document.webkitExitFullscreen
+               || document.mozCancelFullScreen || document.msExitFullscreen;
+    if (exit) Promise.resolve(exit.call(document)).catch(() => {});
+  }
+}
+
+// Listen for fullscreen change and resize the game to fill the new viewport
+['fullscreenchange','webkitfullscreenchange','mozfullscreenchange','MSFullscreenChange']
+  .forEach(ev => document.addEventListener(ev, () => setTimeout(resizeGame, 150)));
+
 function setupInput() {
   const el = app.canvas;
   el.addEventListener("mousemove", e => {
@@ -6227,9 +6281,12 @@ function setupInput() {
     const g2 = toGame(t.clientX, t.clientY); mouseX = g2.x; mouseY = g2.y;
   }, { passive:false });
   el.addEventListener("touchend", e => { e.preventDefault(); firing = false; }, { passive:false });
-  window.addEventListener("resize", () => {
-    resizeGame();
-  });
+  window.addEventListener("resize", () => { resizeGame(); });
+  // Resize on fullscreen change (handles both enter and exit)
+  const onFSChange = () => { setTimeout(resizeGame, 200); };
+  document.addEventListener("fullscreenchange", onFSChange);
+  document.addEventListener("webkitfullscreenchange", onFSChange);
+  document.addEventListener("mozfullscreenchange", onFSChange);
   el.style.cursor = "none";
   // Cursor management: hide in normal mode, show as default when aim menu is open
   window._updateCursor = function() {
