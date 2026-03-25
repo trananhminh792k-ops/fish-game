@@ -100,6 +100,51 @@ canvas { display:block; }
   color:rgba(150,200,255,0.6); margin-top:16px;
   font-style:italic; min-height:1.2em;
 }
+
+/* ── Portrait rotation warning (mobile only) ─────── */
+#portrait-warning {
+  display: none;
+  position: fixed; inset: 0; z-index: 99999;
+  background: linear-gradient(160deg, #020d1f 0%, #031020 100%);
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-family: Arial, sans-serif;
+  color: #fff;
+  text-align: center;
+  padding: 32px;
+  gap: 28px;
+}
+#portrait-warning .rotate-icon {
+  font-size: 80px;
+  animation: rotateHint 2s ease-in-out infinite;
+  display: block;
+}
+@keyframes rotateHint {
+  0%   { transform: rotate(0deg);   }
+  40%  { transform: rotate(-90deg); }
+  60%  { transform: rotate(-90deg); }
+  100% { transform: rotate(0deg);   }
+}
+#portrait-warning h2 {
+  font-size: clamp(1.4rem, 6vw, 2.2rem);
+  font-weight: 900;
+  background: linear-gradient(180deg, #ffe566, #ffa500);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin: 0;
+}
+#portrait-warning p {
+  font-size: clamp(0.9rem, 3.5vw, 1.2rem);
+  color: #88ccff;
+  margin: 0;
+  line-height: 1.5;
+}
+/* On landscape: hide the warning, show the game */
+@media (orientation: landscape) {
+  #portrait-warning { display: none !important; }
+}
 </style>
 </head>
 <body>
@@ -126,6 +171,13 @@ canvas { display:block; }
     </div>
   </div>
   <div id="loading-tip">Tip: Use the Aim button to lock onto high-value targets!</div>
+</div>
+
+<!-- Portrait rotation warning — only shown on mobile portrait -->
+<div id="portrait-warning">
+  <span class="rotate-icon">📱</span>
+  <h2>Please Rotate Your Phone</h2>
+  <p>Ocean Hunter is best played in<br><strong>landscape mode</strong></p>
 </div>
 
 <script>
@@ -196,6 +248,54 @@ tipEl.style.transition = 'opacity 0.4s ease';
 // Expose to game init
 window._loadingProgress  = updateProgress;
 window._loadingComplete  = hideLoadingScreen;
+
+// ── Portrait / Landscape detection (mobile only) ──────────────────────────────
+(function() {
+  const warning = document.getElementById('portrait-warning');
+  if (!warning) return;
+
+  // Only apply on mobile/touch devices
+  const isMobileDevice = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+  if (!isMobileDevice) return;  // desktop: never show warning
+
+  function isPortrait() {
+    // Use screen.orientation if available, fallback to window dimensions
+    if (screen.orientation && screen.orientation.type) {
+      return screen.orientation.type.startsWith('portrait');
+    }
+    return window.innerHeight > window.innerWidth;
+  }
+
+  function updateOrientation() {
+    const portrait = isPortrait();
+    warning.style.display = portrait ? 'flex' : 'none';
+
+    // Pause/resume game loop and audio based on orientation
+    if (portrait) {
+      // Entering portrait: pause BGM
+      if (window.AudioMgr && !window.AudioMgr._sfxOff) {
+        const snd = window.AudioMgr._htmlSounds && window.AudioMgr._htmlSounds.bgm_underwater;
+        if (snd && !snd.paused) snd.pause();
+      }
+    } else {
+      // Returning to landscape: resume BGM, resize game
+      if (window.AudioMgr) window.AudioMgr.unlockAndStart();
+      if (window.resizeGame) setTimeout(window.resizeGame, 150);
+    }
+  }
+
+  // Listen for orientation changes
+  screen.orientation
+    ? screen.orientation.addEventListener('change', updateOrientation)
+    : window.addEventListener('orientationchange', updateOrientation);
+  window.addEventListener('resize', updateOrientation);
+
+  // Check immediately on load
+  updateOrientation();
+
+  // Re-export so game can call it
+  window._updateOrientation = updateOrientation;
+})();
 </script>
 
 <script>
